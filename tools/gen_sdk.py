@@ -100,6 +100,13 @@ RVAS = {
     'UGameplayLib_GetPlayerData': 'public: static class UPlayerData * __cdecl UGameplayLib::GetPlayerData(void)',
     'UGameplayLib_SpawnPlayerShip': 'public: static class APawn * __cdecl UGameplayLib::SpawnPlayerShip(class UObject const *, int, struct UE::Math::TTransform<double> const &, bool)',
     'UGameplayLib_SpawnNPCPawnWithParams_Native': 'public: static class AESPawn * __cdecl UGameplayLib::SpawnNPCPawnWithParams_Native(class UObject const *, class TSubclassOf<class AActor>, struct UE::Math::TTransform<double> const &, struct FSpawnParameter const &)',
+    'AESPlayerController_InputStartFirePrimary': 'private: void __cdecl AESPlayerController::InputStartFirePrimary(void)',
+    'AESPlayerController_InputStopFirePrimary': 'private: void __cdecl AESPlayerController::InputStopFirePrimary(void)',
+    'AESPlayerController_InputStartFireSecondary': 'private: void __cdecl AESPlayerController::InputStartFireSecondary(void)',
+    'AESPlayerController_InputStopFireSecondary': 'private: void __cdecl AESPlayerController::InputStopFireSecondary(void)',
+    'AESPawn_StartFire': 'public: void __cdecl AESPawn::StartFire(bool)',
+    'AESPawn_AreControlsDisabled': 'public: bool __cdecl AESPawn::AreControlsDisabled(void)',
+    'UWeaponComponent_SetAllowFire': 'public: void __cdecl UWeaponComponent::SetAllowFire(bool)',
     'AESGameModeBase_GetESGameMode': 'regex:^public: static class AESGameModeBase \\* __cdecl AESGameModeBase::GetESGameMode\\(.*$',
 }
 
@@ -147,6 +154,7 @@ OFFSETS = {
     'USceneComponent': ['AttachParent', 'AttachChildren', 'RelativeLocation', 'RelativeRotation', 'RelativeScale3D', 'ComponentVelocity', 'bAbsoluteLocation'],
     'UPlayer': ['PlayerController', 'CurrentNetSpeed', 'ConfiguredInternetSpeed', 'ConfiguredLanSpeed'],
     'ULocalPlayer': ['ViewportClient', 'ControllerId'],
+    'UHealthComponent': ['HitpointRatio', 'MinHitpointRatio', 'BonusHitpointRatio', 'CannotDeplete'],
     'AESPawn': [],
     'AESPlayerController': [],
     'AESGameModeBase': [],

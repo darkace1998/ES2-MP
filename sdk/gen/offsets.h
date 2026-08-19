@@ -375,6 +375,13 @@ namespace es2off {
     constexpr uint32_t ViewportClient = 0x78; // TObjectPtr<UGameViewportClient> (size 8) from ULocalPlayer
     constexpr uint32_t ControllerId = 0xE0; // int (size 4) from ULocalPlayer
   }
+  namespace UHealthComponent {
+    constexpr uint32_t __size = 1336;
+    constexpr uint32_t HitpointRatio = 0xB0; // float (size 4) from UHitpointComponent
+    constexpr uint32_t MinHitpointRatio = 0x22C; // float (size 4) from UHitpointComponent
+    constexpr uint32_t BonusHitpointRatio = 0x230; // float (size 4) from UHitpointComponent
+    constexpr uint32_t CannotDeplete = 0x238; // bool (size 1) from UHitpointComponent
+  }
   namespace AESPawn {
     constexpr uint32_t __size = 4912;
   }

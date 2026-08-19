@@ -90,5 +90,12 @@ namespace es2rva {
   constexpr uint32_t UGameplayLib_GetPlayerData = 0x127398C; // public: static class UPlayerData * __cdecl UGameplayLib::GetPlayerData(void)
   constexpr uint32_t UGameplayLib_SpawnPlayerShip = 0x5E3EE5C; // public: static class APawn * __cdecl UGameplayLib::SpawnPlayerShip(class UObject const *, int, struct UE::Math::TTransform<double> const &, bool)
   constexpr uint32_t UGameplayLib_SpawnNPCPawnWithParams_Native = 0x1504C8C; // public: static class AESPawn * __cdecl UGameplayLib::SpawnNPCPawnWithParams_Native(class UObject const *, class TSubclassOf<class AActor>, struct UE::Math::TTransform<double> const &, struct FSpawnParameter const &)
+  constexpr uint32_t AESPlayerController_InputStartFirePrimary = 0x17177A4; // private: void __cdecl AESPlayerController::InputStartFirePrimary(void)
+  constexpr uint32_t AESPlayerController_InputStopFirePrimary = 0x17173D4; // private: void __cdecl AESPlayerController::InputStopFirePrimary(void)
+  constexpr uint32_t AESPlayerController_InputStartFireSecondary = 0x1715CC8; // private: void __cdecl AESPlayerController::InputStartFireSecondary(void)
+  constexpr uint32_t AESPlayerController_InputStopFireSecondary = 0x1715EC4; // private: void __cdecl AESPlayerController::InputStopFireSecondary(void)
+  constexpr uint32_t AESPawn_StartFire = 0x1717828; // public: void __cdecl AESPawn::StartFire(bool)
+  constexpr uint32_t AESPawn_AreControlsDisabled = 0x2B41704; // public: bool __cdecl AESPawn::AreControlsDisabled(void)
+  constexpr uint32_t UWeaponComponent_SetAllowFire = 0x17174E8; // public: void __cdecl UWeaponComponent::SetAllowFire(bool)
   constexpr uint32_t AESGameModeBase_GetESGameMode = 0x1505960; // public: static class AESGameModeBase * __cdecl AESGameModeBase::GetESGameMode(class UObject const *)
 }

@@ -10,6 +10,7 @@
 #include "console.h"
 #include "log.h"
 #include "hooks.h"
+#include "combat.h"
 #include <windows.h>
 #include <cmath>
 #include <cstring>
@@ -153,7 +154,29 @@ static bool RecvTransform(APlayerController* pc, const std::string& body) {
     ++g_rxCount;
     if (g_verbose && (pl->rxPackets % 40 == 1))
         LOGF("[coop] rx T p%d -> (%.0f %.0f %.0f)", pl->id, v[0], v[1], v[2]);
+    // relay to the other clients so they can see this ship move (2-player needs no relay)
+    if (players::Count() > 2) {
+        std::string relay = Format("PT|%d|%s", pl->id, body.c_str());
+        for (auto* o : players::All())
+            if (!o->local && o->pc && o->pc != pc) SendToClient(o->pc, relay);
+    }
     return true;
+}
+
+// A client-driven ship must NOT have the server's copy of its movement replicated back to the owning
+// client: the server transform (which we are writing from the client's own reports, one round-trip late)
+// fights the client's local physics and the ship rubberbands. The client is authoritative over its own
+// ship; the host mirrors it locally for AI/collision/damage and forwards it to the OTHER clients.
+static bool g_ownerAuthoritativeMovement = true;
+static void EnforceMovementAuthority() {
+    if (!g_ownerAuthoritativeMovement) return;
+    for (auto* p : players::All()) {
+        if (p->local || !p->pawn) continue;
+        if (GetReplicateMovement(p->pawn)) {
+            SetReplicateMovement(p->pawn, false);
+            LOGF("[coop] p%d: movement replication off (client owns its ship)", p->id);
+        }
+    }
 }
 
 // Host: ease each client-driven pawn toward its last reported state instead of teleporting at packet rate.
@@ -205,6 +228,7 @@ bool OnServerMessage(APlayerController* fromPC, const std::string& raw) {
         return true;
     }
     if (op == "SAY") { LOGF("[coop] say(client): %s", body.c_str()); SendToAllClients("SAY|" + body); return true; }
+    if (combat::OnServerOp(fromPC, op, body)) return true;
     LOGF("[coop] unhandled client op '%s'", op.c_str());
     return true;
 }
@@ -225,7 +249,22 @@ bool OnClientMessage(APlayerController* toPC, const std::string& raw) {
         LOGF("[coop] WELCOME: I am player %d (%s)", id, body.c_str());
         return true;
     }
+    if (op == "PT") {
+        int id = atoi(body.c_str());
+        size_t b2 = body.find('|');
+        if (b2 != std::string::npos && id != players::LocalId()) {
+            players::Player* p = players::ById(id);
+            double v[10];
+            if (p && p->pawn && sscanf(body.c_str() + b2 + 1, "%lf|%lf|%lf|%lf|%lf|%lf|%lf|%lf|%lf|%lf",
+                                       &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9]) == 10) {
+                p->tgtLoc = FVector{v[0], v[1], v[2]}; p->tgtRot = FQuat{v[3], v[4], v[5], v[6]};
+                p->tgtVel = FVector{v[7], v[8], v[9]}; p->tgtTime = g_now; p->hasTarget = true;
+            }
+        }
+        return true;
+    }
     if (op == "SAY") { LOGF("[coop] say(host): %s", body.c_str()); return true; }
+    if (combat::OnClientOp(op, body)) return true;
     LOGF("[coop] unhandled host op '%s'", op.c_str());
     return true;
 }
@@ -275,7 +314,9 @@ static void Tick(float dt) {
     if (r == Role::Host) {
         g_sweepAccum += dt;
         if (g_sweepAccum > 0.5) { g_sweepAccum = 0; RelevancySweep(); }
+        EnforceMovementAuthority();
         SmoothRemotePawns(dt);
+        combat::Tick(dt, true);
     } else if (r == Role::Client) {
         // The first HELLO can be dropped if it beats the connection into steady state; retry until acknowledged.
         if (!g_welcomed && LocalPawn()) {
@@ -284,6 +325,7 @@ static void Tick(float dt) {
         }
         g_sendAccum += dt;
         if (g_sendAccum >= 1.0 / g_sendHz) { g_sendAccum = 0; SendLocalTransform(); }
+        SmoothRemotePawns(dt);   // other players' ships, fed by the host's PT relay
     }
 }
 
@@ -294,6 +336,7 @@ static void CmdCoop(const console::Args& a, std::string& out) {
     else if (a.size() > 2 && a[1] == "smooth") g_smoothRate = atof(a[2].c_str());
     else if (a.size() > 2 && a[1] == "rotrate") g_rotRate = atof(a[2].c_str());
     else if (a.size() > 2 && a[1] == "snap") g_snapDist = atof(a[2].c_str());
+    else if (a.size() > 2 && a[1] == "ownermove") g_ownerAuthoritativeMovement = a[2] == "1";
     else if (a.size() > 1 && a[1] == "sweep") out += Format("swept %d\n", RelevancySweep());
     else if (a.size() > 1 && a[1] == "nopause") ApplyNoPause();
     else if (a.size() > 2 && a[1] == "say") {
@@ -301,12 +344,37 @@ static void CmdCoop(const console::Args& a, std::string& out) {
         if (g_role == Role::Client) SendToServer("SAY|" + m); else SendToAllClients("SAY|" + m);
         out += "sent\n";
     }
-    out += Format("role=%s localId=%d players=%d tx=%llu rx=%llu hz=%.0f smooth=%.1f rot=%.1f snap=%.0f verbose=%d\n",
+    out += Format("role=%s localId=%d players=%d tx=%llu rx=%llu hz=%.0f smooth=%.1f rot=%.1f snap=%.0f ownerMove=%d verbose=%d\n",
                   RoleName(g_role), players::LocalId(), players::Count(),
-                  (unsigned long long)g_txCount, (unsigned long long)g_rxCount, g_sendHz, g_smoothRate, g_rotRate, g_snapDist, (int)g_verbose);
+                  (unsigned long long)g_txCount, (unsigned long long)g_rxCount, g_sendHz, g_smoothRate, g_rotRate, g_snapDist,
+                  (int)g_ownerAuthoritativeMovement, (int)g_verbose);
+    for (auto* p : players::All())
+        if (p->pawn) out += Format("  p%d %-8s repMove=%d hasTarget=%d rx=%llu\n", p->id, p->name.c_str(),
+                                   (int)GetReplicateMovement(p->pawn), (int)p->hasTarget, (unsigned long long)p->rxPackets);
 }
 
 static void CmdPlayers(const console::Args&, std::string& out) { out += players::Describe(); }
+
+// push <vx> <vy> <vz> : give the local ship a velocity. Used to verify the owning client keeps control
+// of its own movement (no server correction / rubberbanding).
+static void CmdPush(const console::Args& a, std::string& out) {
+    AActor* pawn = LocalPawn();
+    if (!pawn) { out = "no local pawn\n"; return; }
+    FVector v{ a.size() > 1 ? atof(a[1].c_str()) : 0.0, a.size() > 2 ? atof(a[2].c_str()) : 0.0, a.size() > 3 ? atof(a[3].c_str()) : 0.0 };
+    SetPhysVelocity(pawn, v);
+    FTransform t = GetActorTransform(pawn);
+    out += Format("pushed (%.0f %.0f %.0f); pos now (%.0f, %.0f, %.0f)\n", v.X, v.Y, v.Z, t.Translation.X, t.Translation.Y, t.Translation.Z);
+}
+
+static void CmdWhere(const console::Args&, std::string& out) {
+    AActor* pawn = LocalPawn();
+    if (!pawn) { out = "no local pawn\n"; return; }
+    FTransform t = GetActorTransform(pawn);
+    FVector vel{};
+    Rva<std::remove_pointer_t<Fn_GetVelocity>>(es2rva::AActor_GetVelocity)(pawn, &vel);
+    out += Format("%.0f %.0f %.0f  vel=(%.0f %.0f %.0f) |v|=%.0f\n", t.Translation.X, t.Translation.Y, t.Translation.Z, vel.X, vel.Y, vel.Z,
+                  sqrt(vel.X*vel.X + vel.Y*vel.Y + vel.Z*vel.Z));
+}
 
 static void CmdTp(const console::Args& a, std::string& out) {
     AActor* pawn = LocalPawn();
@@ -331,6 +399,8 @@ static void CmdTp(const console::Args& a, std::string& out) {
 void Register() {
     console::Register("coop", "coop [hz N|verbose 0/1|smooth R|rotrate R|snap D|sweep|say <text>|nopause] - co-op core", CmdCoop);
     console::Register("players", "list the player registry (id, controller, pawn, position)", CmdPlayers);
+    console::Register("push", "push <vx> <vy> <vz> - set the local ship's velocity (rubberband test)", CmdPush);
+    console::Register("where", "local pawn position and velocity", CmdWhere);
     console::Register("tp", "tp <x> <y> <z> | tp <playerId> - teleport the local pawn", CmdTp);
 }
 void OnInit() {

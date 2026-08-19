@@ -130,6 +130,7 @@ bool SetActorTransform(AActor* a, const FTransform& t, bool sweep = false, int t
 inline uint8_t GetRole(AActor* a) { return UE_FIELD(uint8_t, a, es2off::AActor::Role); }
 inline uint8_t GetRemoteRole(AActor* a) { return UE_FIELD(uint8_t, a, es2off::AActor::RemoteRole); }
 inline bool GetReplicates(AActor* a) { return (UE_FIELD(uint8_t, a, es2off::AActor::bReplicates_off) & es2off::AActor::bReplicates_mask) != 0; }
+inline bool GetReplicateMovement(AActor* a) { return (UE_FIELD(uint8_t, a, es2off::AActor::bReplicateMovement_off) & es2off::AActor::bReplicateMovement_mask) != 0; }
 void SetReplicates(AActor* a, bool b);
 void SetReplicateMovement(AActor* a, bool b);
 
