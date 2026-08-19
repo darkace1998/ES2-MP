@@ -9,6 +9,7 @@
 namespace commands { void RegisterBasic(); }
 namespace net { void Register(); void OnInit(); }
 #include "coop.h"
+#include "authority.h"
 
 namespace {
 HMODULE g_self = nullptr;
@@ -44,6 +45,7 @@ DWORD WINAPI InitThread(LPVOID) {
     commands::RegisterBasic();
     net::Register();
     coop::Register();
+    authority::Register();
 
     // console port: base 27100 (+0.. depending on free)
     int basePort = 27100;
@@ -56,6 +58,7 @@ DWORD WINAPI InitThread(LPVOID) {
     hooks::Install("UGameEngine::Tick", es2rva::UGameEngine_Tick, (void*)&Detour_UGameEngine_Tick, (void**)&g_origTick);
     net::OnInit();
     coop::OnInit();
+    authority::OnInit();
     g_initialized = true;
     LOGF("init complete");
     return 0;

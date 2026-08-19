@@ -13,4 +13,6 @@ bool OnClientMessage(ue::APlayerController* toPC, const std::string& msg);     /
 void SendToServer(const std::string& msg);                                      // client -> host (reliable)
 void SendToClient(ue::APlayerController* pc, const std::string& msg);           // host -> one client (reliable)
 void SendToAllClients(const std::string& msg);
+void OnPostLogin(ue::APlayerController* pc);      // host: a client finished joining
+void OnLogout(ue::APlayerController* pc);         // host: a client left
 }

@@ -337,6 +337,10 @@ namespace es2off {
     constexpr uint32_t bAllowDuringConstructionScript = 0x32; // unsigned char : 1 @bit3 (size 1) from FActorSpawnParameters
     constexpr uint32_t NameMode = 0x33; // FActorSpawnParameters::ESpawnActorNameMode (size 1) from FActorSpawnParameters
     constexpr uint32_t ObjectFlags = 0x34; // EObjectFlags (size 4) from FActorSpawnParameters
+    constexpr uint32_t bRemoteOwned_off = 0x32; constexpr uint32_t bRemoteOwned_mask = 0x1; // unsigned char : 1 @bit0 from FActorSpawnParameters
+    constexpr uint32_t bNoFail_off = 0x32; constexpr uint32_t bNoFail_mask = 0x2; // unsigned char : 1 @bit1 from FActorSpawnParameters
+    constexpr uint32_t bDeferConstruction_off = 0x32; constexpr uint32_t bDeferConstruction_mask = 0x4; // unsigned char : 1 @bit2 from FActorSpawnParameters
+    constexpr uint32_t bAllowDuringConstructionScript_off = 0x32; constexpr uint32_t bAllowDuringConstructionScript_mask = 0x8; // unsigned char : 1 @bit3 from FActorSpawnParameters
   }
   namespace FRepMovement {
     constexpr uint32_t __size = 136;

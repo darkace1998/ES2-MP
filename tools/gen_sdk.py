@@ -39,6 +39,9 @@ RVAS = {
     'UKismetSystemLibrary_ExecuteConsoleCommand': 'public: static void __cdecl UKismetSystemLibrary::ExecuteConsoleCommand(class UObject const *, class FString const &, class APlayerController *)',
     'APlayerController_ConsoleCommand': 'public: virtual class FString __cdecl APlayerController::ConsoleCommand(class FString const &, bool)',
     'UWorld_SpawnActor':        'public: class AActor * __cdecl UWorld::SpawnActor(class UClass *, struct UE::Math::TVector<double> const *, struct UE::Math::TRotator<double> const *, struct FActorSpawnParameters const &)',
+    # THE spawn funnel: both the vector/rotator overload and SpawnActorAbsolute forward into this one.
+    'UWorld_SpawnActor_Transform': 'public: class AActor * __cdecl UWorld::SpawnActor(class UClass *, struct UE::Math::TTransform<double> const *, struct FActorSpawnParameters const &)',
+    'UWorld_SpawnActorAbsolute': 'public: class AActor * __cdecl UWorld::SpawnActorAbsolute(class UClass *, struct UE::Math::TTransform<double> const &, struct FActorSpawnParameters const &)',
     'UWorld_Listen':            'public: bool __cdecl UWorld::Listen(struct FURL &)',
     'UWorld_ServerTravel':      'public: bool __cdecl UWorld::ServerTravel(class FString const &, bool, bool)',
     'UWorld_SetGameMode':       'public: bool __cdecl UWorld::SetGameMode(struct FURL const &)',
@@ -151,7 +154,8 @@ OFFSETS = {
     'UPlayerData': [],
     'UShipMovementComponent': [],
 }
-BITFIELDS = {  # class -> bitfield members to also emit (offset + mask) — resolved from the layout types ('bool : N @bitK')
+BITFIELDS = {  # class -> bitfield members  (adds <m>_off and <m>_mask)
+    'FActorSpawnParameters': ['bRemoteOwned', 'bNoFail', 'bDeferConstruction', 'bAllowDuringConstructionScript'],
     'AActor': ['bReplicates', 'bReplicateMovement', 'bNetStartup', 'bOnlyRelevantToOwner', 'bAlwaysRelevant', 'bNetLoadOnClient', 'bNetUseOwnerRelevancy', 'bHidden', 'bTearOff', 'bExchangedRoles', 'bHasFinishedSpawning', 'bActorEnableCollision', 'bCanBeDamaged', 'bReplicateUsingRegisteredSubObjectList'],
     'APawn': ['bUseControllerRotationPitch', 'bCanAffectNavigationGeneration'],
     'UNetDriver': [],

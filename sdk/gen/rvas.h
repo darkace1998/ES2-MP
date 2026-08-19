@@ -31,6 +31,8 @@ namespace es2rva {
   constexpr uint32_t UKismetSystemLibrary_ExecuteConsoleCommand = 0x168C640; // public: static void __cdecl UKismetSystemLibrary::ExecuteConsoleCommand(class UObject const *, class FString const &, class APlayerController *)
   constexpr uint32_t APlayerController_ConsoleCommand = 0x4E821C4; // public: virtual class FString __cdecl APlayerController::ConsoleCommand(class FString const &, bool)
   constexpr uint32_t UWorld_SpawnActor = 0x1518E24; // public: class AActor * __cdecl UWorld::SpawnActor(class UClass *, struct UE::Math::TVector<double> const *, struct UE::Math::TRotator<double> const *, struct FActorSpawnParameters const &)
+  constexpr uint32_t UWorld_SpawnActor_Transform = 0x14DB504; // public: class AActor * __cdecl UWorld::SpawnActor(class UClass *, struct UE::Math::TTransform<double> const *, struct FActorSpawnParameters const &)
+  constexpr uint32_t UWorld_SpawnActorAbsolute = 0x4CD0204; // public: class AActor * __cdecl UWorld::SpawnActorAbsolute(class UClass *, struct UE::Math::TTransform<double> const &, struct FActorSpawnParameters const &)
   constexpr uint32_t UWorld_Listen = 0x50EA9AC; // public: bool __cdecl UWorld::Listen(struct FURL &)
   constexpr uint32_t UWorld_ServerTravel = 0x50F5104; // public: bool __cdecl UWorld::ServerTravel(class FString const &, bool, bool)
   constexpr uint32_t UWorld_SetGameMode = 0x50F5300; // public: bool __cdecl UWorld::SetGameMode(struct FURL const &)

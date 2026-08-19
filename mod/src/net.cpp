@@ -96,6 +96,7 @@ static void* H_ISocketSubsystem_Get(const FName* n) { return o_ISocketSubsystem_
 static void H_PostLogin(AGameModeBase* gm, APlayerController* pc) {
     LOGF("[net] AGameModeBase::PostLogin gm=%s pc=%s", GetFullName((UObject*)gm).c_str(), GetFullName((UObject*)pc).c_str());
     o_PostLogin(gm, pc);
+    coop::OnPostLogin(pc);
     LOGF("[net] PostLogin done");
 }
 static void H_RestartPlayer(AGameModeBase* gm, void* c) {
