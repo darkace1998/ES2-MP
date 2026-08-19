@@ -1,0 +1,18 @@
+sdk/raw/
+*.zst
+mod/build/
+mod/test/*.dll
+mod/test/*.exe
+mod/test/*.pdb
+mod/test/*.lib
+
+# build artifacts / captures
+run/
+mod/build/
+
+# large generated PDB extracts (regenerate with es2-sdkgen / tools/pdb_publics.py)
+sdk/symbols.tsv
+sdk/funcs.pkl
+sdk/raw/
+*.pyc
+__pycache__/
