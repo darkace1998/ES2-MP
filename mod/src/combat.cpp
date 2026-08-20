@@ -570,6 +570,85 @@ static void H_WeaponTick(UObject* comp, float dt, int tickType, void* tickFn) {
     o_WeaponTick(comp, dt, tickType, tickFn);
 }
 
+// ---------------------------------------------------------------- NPC motion (client)
+//
+// NPC ships replicate with bRepPhysics, so the client integrates their physics locally between updates
+// and lurches whenever a correction lands. Measured per-frame on one machine (`jitter`): the host moves a
+// scout with a worst frame 1.26x its median step; the client's worst is 3.1x.
+//
+// Trying to intercept the correction failed — UE5 applies physics replication through its own physics
+// path, so neither AActor::PostNetReceiveLocationAndRotation nor PostNetReceivePhysicState ever fires —
+// and absorbing the jump after the fact made things worse, because the body keeps simulating underneath.
+//
+// So stop reacting to physics and drive the actor instead. AActor::ReplicatedMovement is the authoritative
+// state the client already receives; follow it with the exact interpolate-and-extrapolate the mod uses for
+// remote player pawns, overriding the transform every frame so the local simulation cannot diverge.
+static bool g_npcFollow = true;
+static float g_npcFollowRate = 12.f;      // how fast we converge on the target
+static double g_npcMaxExtrap = 0.25;      // cap dead-reckoning; a stale target must not fly away
+static double g_npcSnapDist = 15000.0;    // past this, jump rather than slide
+static uint64_t g_npcFollowed = 0, g_npcFollowSnaps = 0;
+static double g_npcNow = 0;
+
+struct NpcTarget {
+    FVector loc{}, vel{};
+    double at = 0;
+    bool has = false;
+};
+static std::map<AActor*, NpcTarget> g_npcTargets;
+static std::vector<AActor*> g_npcCache;
+static double g_npcCacheAge = 0;
+
+void NpcFollowTick(float dt) {
+    if (coop::CurrentRole() != coop::Role::Client || dt <= 0) return;
+    g_npcNow += dt;
+
+    // GetAllActorsOfClass walks every actor in the world, so refresh the list occasionally rather than
+    // every frame; entries are revalidated on use.
+    g_npcCacheAge -= dt;
+    if (g_npcCacheAge <= 0) {
+        g_npcCacheAge = 0.5;
+        UClass* pawnClass = FindClass("ESPawn");
+        g_npcCache.clear();
+        if (pawnClass)
+            for (AActor* a : GetAllActorsOfClass(GetWorld(), pawnClass))
+                if (a && !players::ByPawn(a)) g_npcCache.push_back(a);
+    }
+    if (!g_npcFollow) return;
+
+    double a = dt * g_npcFollowRate;
+    if (a > 1) a = 1;
+
+    for (AActor* act : g_npcCache) {
+        if (!act || !IsValidObject((UObject*)act)) continue;
+        if (GetRole(act) != 1 /*ROLE_SimulatedProxy*/) continue;      // only proxies the server owns
+
+        void* rm = reinterpret_cast<char*>(act) + es2off::AActor::ReplicatedMovement;
+        const FVector& rl = UE_FIELD(FVector, rm, es2off::FRepMovement::Location);
+        const FVector& rv = UE_FIELD(FVector, rm, es2off::FRepMovement::LinearVelocity);
+        if (rl.X == 0 && rl.Y == 0 && rl.Z == 0) continue;            // nothing replicated yet
+
+        NpcTarget& t = g_npcTargets[act];
+        if (!t.has || rl.X != t.loc.X || rl.Y != t.loc.Y || rl.Z != t.loc.Z) {
+            t.loc = rl; t.vel = rv; t.at = g_npcNow; t.has = true;    // a fresh update landed
+        }
+
+        double age = g_npcNow - t.at;
+        if (age > g_npcMaxExtrap) age = g_npcMaxExtrap;
+        FVector predicted{ t.loc.X + t.vel.X * age, t.loc.Y + t.vel.Y * age, t.loc.Z + t.vel.Z * age };
+
+        FTransform cur = GetActorTransform(act);
+        double dx = predicted.X - cur.Translation.X, dy = predicted.Y - cur.Translation.Y, dz = predicted.Z - cur.Translation.Z;
+        double err = sqrt(dx * dx + dy * dy + dz * dz);
+        FTransform next = cur;
+        if (err > g_npcSnapDist) { next.Translation = predicted; ++g_npcFollowSnaps; }
+        else next.Translation = FVector{ cur.Translation.X + dx * a, cur.Translation.Y + dy * a, cur.Translation.Z + dz * a };
+        SetActorTransform(act, next, false, 1 /*TeleportPhysics*/);
+        ++g_npcFollowed;
+    }
+    if (g_npcTargets.size() > 512) g_npcTargets.clear();
+}
+
 // ---------------------------------------------------------------- messages
 bool OnServerOp(APlayerController* from, const std::string& op, const std::string& body) {
     if (op == "AIM") {
@@ -695,12 +774,22 @@ static FVector g_jitterLast{};
 static bool g_jitterHasLast = false;
 static double g_jitterLeft = 0;
 static std::vector<double> g_jitterSteps;
+// Deviation of the displayed position from the authoritative ReplicatedMovement, read in the SAME tick.
+// This is the fidelity question ("is the ship where the server says?") and, unlike anything cross-machine,
+// it carries no sampling skew at all.
+static std::vector<double> g_jitterDev;
 
 void JitterTick(float dt) {
     if (g_jitterLeft <= 0 || !g_jitterTarget) return;
     if (!IsValidObject((UObject*)g_jitterTarget)) { g_jitterLeft = 0; return; }
     g_jitterLeft -= dt;
     FVector p = GetActorTransform(g_jitterTarget).Translation;
+    {
+        void* rm = reinterpret_cast<char*>(g_jitterTarget) + es2off::AActor::ReplicatedMovement;
+        const FVector& rl = UE_FIELD(FVector, rm, es2off::FRepMovement::Location);
+        if (!(rl.X == 0 && rl.Y == 0 && rl.Z == 0) && g_jitterDev.size() < 4000)
+            g_jitterDev.push_back(sqrt((p.X - rl.X) * (p.X - rl.X) + (p.Y - rl.Y) * (p.Y - rl.Y) + (p.Z - rl.Z) * (p.Z - rl.Z)));
+    }
     if (g_jitterHasLast) {
         double d = sqrt((p.X - g_jitterLast.X) * (p.X - g_jitterLast.X) +
                         (p.Y - g_jitterLast.Y) * (p.Y - g_jitterLast.Y) +
@@ -718,6 +807,7 @@ static void CmdJitter(const console::Args& a, std::string& out) {
         if (!t) { out = Format("guid %llu not found here\n", (unsigned long long)g); return; }
         g_jitterTarget = t;
         g_jitterSteps.clear();
+        g_jitterDev.clear();
         g_jitterHasLast = false;
         g_jitterLeft = a.size() > 2 ? atof(a[2].c_str()) : 5.0;
         out += Format("sampling %s for %.1fs\n", GetName((UObject*)t).c_str(), g_jitterLeft);
@@ -730,8 +820,26 @@ static void CmdJitter(const console::Args& a, std::string& out) {
     double mx = v.back();
     double sum = 0; for (double d : v) sum += d;
     int snaps = 0; for (double d : v) if (med > 0.01 && d > med * 4) ++snaps;
-    out += Format("samples=%d  median step=%.1f u  mean=%.1f u  max=%.1f u  snaps(>4x median)=%d\n",
-                  (int)v.size(), med, sum / v.size(), mx, snaps);
+    // Step size alone is a poor smoothness measure: an actor that lags behind shows SMALLER steps
+    // without looking any smoother. What the eye reads as jitter is the step changing abruptly, so also
+    // report the spread of steps and the worst frame-to-frame change (jerk), both relative to the mean.
+    double mean = sum / v.size();
+    double var = 0; for (double d : v) var += (d - mean) * (d - mean);
+    double sd = sqrt(var / v.size());
+    double jerk = 0;
+    for (size_t i = 1; i < g_jitterSteps.size(); ++i) {
+        double j = fabs(g_jitterSteps[i] - g_jitterSteps[i - 1]);
+        if (j > jerk) jerk = j;
+    }
+    out += Format("samples=%d  median=%.0f mean=%.0f max=%.0f u | spread sd/mean=%.2f  worst jerk=%.0f u (%.2f x mean)\n",
+                  (int)v.size(), med, mean, mx, mean > 0 ? sd / mean : 0.0, jerk, mean > 0 ? jerk / mean : 0.0);
+    if (!g_jitterDev.empty()) {
+        std::vector<double> d = g_jitterDev;
+        std::sort(d.begin(), d.end());
+        double ds = 0; for (double x : d) ds += x;
+        out += Format("  deviation from replicated state: mean=%.0f u  median=%.0f u  max=%.0f u\n",
+                      ds / d.size(), d[d.size() / 2], d.back());
+    }
     out += Format("  still sampling: %s\n", g_jitterLeft > 0 ? "yes" : "no");
 }
 
@@ -848,6 +956,8 @@ static void CmdAimInfo(const console::Args& a, std::string& out) {
 static void CmdCombat(const console::Args& a, std::string& out) {
     if (a.size() > 2 && a[1] == "route") g_routeFire = a[2] == "1";
     if (a.size() > 2 && a[1] == "localfire") g_localFire = a[2] == "1";
+    if (a.size() > 2 && a[1] == "npcfollow") { g_npcFollow = a[2] == "1"; out += Format("npc follow %d\n", (int)g_npcFollow); return; }
+    if (a.size() > 2 && a[1] == "followrate") { g_npcFollowRate = (float)atof(a[2].c_str()); out += Format("rate %.1f\n", g_npcFollowRate); return; }
     if (a.size() > 2 && a[1] == "clientregen") { g_blockClientRegen = a[2] == "0"; out += Format("client regen blocked %d\n", (int)g_blockClientRegen); return; }
     if (a.size() > 2 && a[1] == "aimattarget") { g_aimAtTarget = a[2] == "1"; out += Format("aim-at-target %d\n", (int)g_aimAtTarget); return; }
     if (a.size() > 2 && a[1] == "autoaim") { g_autoAimSync = a[2] == "1"; out += Format("autoaim sync %d\n", (int)g_autoAimSync); return; }
@@ -864,6 +974,9 @@ static void CmdCombat(const console::Args& a, std::string& out) {
                   (unsigned long long)g_lockApplied, (unsigned long long)g_guidScans);
     out += Format("npcAimSync=%d npcAimSent=%llu npcAimApplied=%llu npcAimTracked=%d\n",
                   (int)g_npcAimSync, (unsigned long long)g_npcAimSent, (unsigned long long)g_npcAimApplied, (int)g_npcAim.size());
+    out += Format("npcFollow=%d rate=%.1f followed=%llu snaps=%llu tracked=%d\n", (int)g_npcFollow,
+                  g_npcFollowRate, (unsigned long long)g_npcFollowed, (unsigned long long)g_npcFollowSnaps,
+                  (int)g_npcCache.size());
     out += Format("blockClientRegen=%d regenBlocked=%llu\n", (int)g_blockClientRegen, (unsigned long long)g_regenBlocked);
     out += Format("aimAtTarget=%d retargeted=%llu\n", (int)g_aimAtTarget, (unsigned long long)g_aimRetargeted);
     out += Format("aimSync=%d aimSent=%llu aimApplied=%llu aimKnown=%d\n",
@@ -964,6 +1077,7 @@ void Register() {
     console::Register("npcpos", "npcpos [max] - NPC pawn positions keyed by NetGUID", CmdNpcPos);
     console::Register("guid", "guid <n> - resolve a NetGUID to an actor on this machine", CmdGuid);
     console::RegisterTick("jitter", JitterTick);
+    console::RegisterTick("npcfollow", NpcFollowTick);
     console::Register("aiminfo", "aiminfo [npc] - weapon FocusLocation per player, or per NPC keyed by NetGUID", CmdAimInfo);
     console::Register("hp", "hp [Class] - health/shield ratios of pawns in the world", CmdHp);
     console::Register("lock", "lock [playerId] - acquire closest target (host: on that player's server-side pawn)", CmdLock);

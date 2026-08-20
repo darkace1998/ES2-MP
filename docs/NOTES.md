@@ -36,16 +36,23 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
 | Capacity | `maxplayers` (GameSession default 16; ES2 has no cap of its own) |
 
 ### Hard-won gotchas (each cost a crash or a silent failure)
-- **NPC visual desync is NOT fixed, and three approaches failed.** Measure it per-frame on ONE machine
-  (`jitter <guid> [sec]`): the host moves a scout with a worst frame 1.26x its median step, the client
-  1603 uu against a 519 uu median — 3.1x. What did not work: (a) raising `NetServerMaxTickRate` from 30
-  had no measurable effect, and bandwidth was never the limit (MaxClientRate 100000,
-  NetCullDistanceSquared 1e30); (b) hooking `AActor::PostNetReceiveLocationAndRotation` AND
-  `PostNetReceivePhysicState` caught nothing at all — UE5 applies physics replication through its own
-  physics path, not those callbacks; (c) detecting outlier steps per tick and walking the error off made
-  it strictly worse (max step 1608 -> 3099 uu), because the body keeps physics-simulating underneath and
-  the corrections stack. Untried next idea: stop client-side NPC proxies simulating physics at all and
-  drive them purely from replicated transforms.
+- **NPC proxies are driven from `AActor::ReplicatedMovement`, not left to local physics.** They replicate
+  with bRepPhysics, so a client integrates their physics between updates and lurches on every correction.
+  Three things did NOT work: raising `NetServerMaxTickRate` from 30 (no effect; bandwidth was never the
+  limit at MaxClientRate 100000 and cull distance 1e30); hooking
+  `AActor::PostNetReceiveLocationAndRotation` and `PostNetReceivePhysicState` (neither ever fires — UE5
+  applies physics replication through its own path); and absorbing outlier steps per tick (strictly worse,
+  the body keeps simulating underneath so corrections stack). What works is following the authoritative
+  state directly with the same interpolate-and-extrapolate used for remote player pawns.
+  `ReplicatedMovement` was verified fresh on the client and tracks the host closely.
+- **Measure fidelity, not step size, and never across machines.** Two console round-trips are tens of ms
+  apart; at ~10000 uu/s that skew is worth hundreds of units — the size of the effect — so every
+  cross-machine position number is noise. Per-frame step size is also misleading: an actor that lags shows
+  SMALLER steps without being smoother. The metric that reproduces is deviation of the displayed position
+  from that actor's own `ReplicatedMovement`, both read in the SAME tick (`jitter <guid> [sec]`): two
+  independent "off" runs agreed at 589/602 uu mean and 1514/1251 uu worst, against 523 uu mean and 960 uu
+  worst with following on. The smoothness (jerk) difference stayed inside run-to-run noise — do not claim
+  it.
 - **Never compare a host reading with a client reading through two console calls.** They are tens of ms
   apart; at ~10000 uu/s that skew is worth hundreds of units, the same size as what is being measured.
   Every cross-machine position number taken that way is noise — measure per-frame on one machine instead.
