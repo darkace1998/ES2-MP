@@ -19,7 +19,10 @@ def con(port, cmd):
 def players(port=HOST):
     out = con(port, 'players')
     rows = {}
-    for m in re.finditer(r'\[(\d+)\]\s+(\S+)\s+(local|remote)\s+pc=(\S+)\s+pawn=(\S+)', out):
+    # The name column is a Steam persona name, which routinely contains spaces and brackets
+    # ("[DC-Lan Party] DARKACE"), so it cannot be matched with \S+ — take everything up to the
+    # local/remote column instead.
+    for m in re.finditer(r'\[(\d+)\]\s+(.*?)\s+(local|remote)\s+pc=(\S+)\s+pawn=(\S+)', out):
         rows[int(m.group(1))] = dict(name=m.group(2), kind=m.group(3), pc=m.group(4), pawn=m.group(5))
     return rows
 

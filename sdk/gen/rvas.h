@@ -98,6 +98,7 @@ namespace es2rva {
   constexpr uint32_t FNetGUIDCache_GetNetGUID = 0x4D91A4C; // public: class FNetworkGUID __cdecl FNetGUIDCache::GetNetGUID(class UObject const *) const
   constexpr uint32_t UPackageMapClient_GetNetGUIDFromObject = 0x4D91B54; // public: virtual class FNetworkGUID __cdecl UPackageMapClient::GetNetGUIDFromObject(class UObject const *) const
   constexpr uint32_t FNetGUIDCache_GetObjectFromNetGUID = 0x4D91D74; // public: class UObject * __cdecl FNetGUIDCache::GetObjectFromNetGUID(class FNetworkGUID const &, bool)
+  constexpr uint32_t UWeaponComponent_TickComponent = 0x12A2368; // public: virtual void __cdecl UWeaponComponent::TickComponent(float, enum ELevelTick, struct FActorComponentTickFunction *)
   constexpr uint32_t UWeaponComponent_StartFire = 0x150FE78; // public: void __cdecl UWeaponComponent::StartFire(void)
   constexpr uint32_t UWeaponComponent_StopFire = 0x171760C; // public: void __cdecl UWeaponComponent::StopFire(void)
   constexpr uint32_t AESPawn_PostInitializeComponents = 0x1515EEC; // public: virtual void __cdecl AESPawn::PostInitializeComponents(void)

@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cmath>
 #include <map>
+#include <functional>
 #include <cstring>
 
 using namespace ue;
@@ -226,8 +227,88 @@ static bool ApplyNpcFire(const std::string& body) {
     return true;
 }
 
+// ---------------------------------------------------------------- aim sync
+//
+// The host is the one that actually pulls a client's trigger, but on the host the client's weapon
+// component has no player behind it: SmoothedAutoaim's inputs come from a controller with no camera or
+// crosshair, and it writes FocusLocation as NaN. Measured on a live session — client focus
+// (203550, -62014, 33505) vs the host's copy (nan, nan, nan). AWeaponBase::GetAimDirection reads exactly
+// that field, so the authoritative shot had no idea where the player was pointing.
+//
+// So the client streams its own FocusLocation and the host stamps it into the server-side components
+// each tick, just before ES2 uses it. SmoothedAutoaim overwrites the field again later in the same
+// tick; we simply write it again next tick, which is enough because the shot is taken before that.
+using Fn_TickComponent = void (*)(UObject* comp, float dt, int tickType, void* tickFn);
+static Fn_TickComponent o_WeaponTick = nullptr;
+static std::map<int, FVector> g_aim;        // host: playerId -> the aim point that player reports
+static double g_aimAccum = 0;
+static float g_aimHz = 20.f;
+static bool g_aimSync = true;
+static uint64_t g_aimSent = 0, g_aimApplied = 0;
+
+static bool IsFinite3(const FVector& v) {
+    return std::isfinite(v.X) && std::isfinite(v.Y) && std::isfinite(v.Z);
+}
+
+// Every weapon component on a pawn (primary AND secondary), by reflected object property.
+static void ForEachWeaponComponent(AActor* pawn, const std::function<void(UObject*)>& fn) {
+    if (!pawn || !IsValidObject((UObject*)pawn)) return;
+    UClass* want = FindClass("WeaponComponent");
+    if (!want) return;
+    for (auto& p : GetProperties((UStruct*)GetClass((UObject*)pawn), true)) {
+        if (p.TypeName != "ObjectProperty") continue;
+        UObject* v = UE_FIELD(UObject*, pawn, p.Offset);
+        if (v && IsValidObject(v) && IsA(v, want)) fn(v);
+    }
+}
+
+// Client: report where our own weapons are pointing.
+void ClientAimTick(float dt) {
+    if (!g_aimSync || coop::CurrentRole() != coop::Role::Client) return;
+    g_aimAccum += dt;
+    if (g_aimAccum < 1.0 / g_aimHz) return;
+    g_aimAccum = 0;
+    APlayerController* pc = LocalPC();
+    AActor* pawn = pc ? UE_FIELD(AActor*, pc, es2off::AController::Pawn) : nullptr;
+    if (!pawn || !IsValidObject((UObject*)pawn)) return;
+    FVector focus{};
+    bool got = false;
+    ForEachWeaponComponent(pawn, [&](UObject* wc) {
+        if (got) return;
+        const FVector& f = UE_FIELD(FVector, wc, es2off::UWeaponComponent::FocusLocation);
+        if (IsFinite3(f)) { focus = f; got = true; }
+    });
+    if (!got) return;
+    coop::SendToServer(Format("AIM|%.1f|%.1f|%.1f", focus.X, focus.Y, focus.Z));
+    ++g_aimSent;
+}
+
+// Host: stamp the reporting player's aim onto their server-side weapons before ES2 reads it.
+static void H_WeaponTick(UObject* comp, float dt, int tickType, void* tickFn) {
+    if (g_aimSync && !g_aim.empty() && comp && coop::CurrentRole() == coop::Role::Host) {
+        AActor* owner = UE_FIELD(AActor*, comp, es2off::UActorComponent::OwnerPrivate);
+        if (owner) {
+            if (players::Player* p = players::ByPawn(owner)) {
+                auto it = g_aim.find(p->id);
+                if (it != g_aim.end() && !p->local) {
+                    UE_FIELD(FVector, comp, es2off::UWeaponComponent::FocusLocation) = it->second;
+                    UE_FIELD(FVector, comp, es2off::UWeaponComponent::ClampedNonAutoAimedFocusLocation) = it->second;
+                    ++g_aimApplied;
+                }
+            }
+        }
+    }
+    o_WeaponTick(comp, dt, tickType, tickFn);
+}
+
 // ---------------------------------------------------------------- messages
 bool OnServerOp(APlayerController* from, const std::string& op, const std::string& body) {
+    if (op == "AIM") {
+        double x = 0, y = 0, z = 0;
+        if (sscanf(body.c_str(), "%lf|%lf|%lf", &x, &y, &z) != 3) return true;
+        if (players::Player* p = players::ByController(from)) g_aim[p->id] = FVector{x, y, z};
+        return true;
+    }
     if (op == "F") {
         int which = 0, down = 0;
         if (sscanf(body.c_str(), "%d|%d", &which, &down) != 2) return true;
@@ -319,14 +400,36 @@ static void CmdInput(const console::Args& a, std::string& out) {
                   GetName((UObject*)pc).c_str());
 }
 
+// aim [playerId] — what each player's weapons are actually pointing at on THIS machine.
+// UWeaponComponent::FocusLocation is the world point AWeaponBase::GetAimDirection reads, so comparing
+// it between host and client is the direct measure of whether a client's shots go where it aims.
+static void CmdAimInfo(const console::Args& a, std::string& out) {
+    for (auto* p : players::All()) {
+        if (!p->pawn || !IsValidObject((UObject*)p->pawn)) continue;
+        UObject* wc = FindComponentOfClass(p->pawn, "WeaponComponent");
+        if (!wc) { out += Format("  p%d %-24s (no weapon component)\n", p->id, GetName((UObject*)p->pawn).c_str()); continue; }
+        FVector& focus = UE_FIELD(FVector, wc, es2off::UWeaponComponent::FocusLocation);
+        UObject* aim = UE_FIELD(UObject*, wc, es2off::UWeaponComponent::CurrentAutoAimTarget);
+        FTransform t = GetActorTransform(p->pawn);
+        out += Format("  p%d %-22s pos=(%.0f, %.0f, %.0f)\n", p->id, GetName((UObject*)p->pawn).c_str(),
+                      t.Translation.X, t.Translation.Y, t.Translation.Z);
+        out += Format("     focus=(%.0f, %.0f, %.0f) autoAimTarget=%s\n", focus.X, focus.Y, focus.Z,
+                      (aim && IsValidObject(aim)) ? GetName(aim).c_str() : "none");
+    }
+    if (out.empty()) out = "no players\n";
+}
+
 static void CmdCombat(const console::Args& a, std::string& out) {
     if (a.size() > 2 && a[1] == "route") g_routeFire = a[2] == "1";
     if (a.size() > 2 && a[1] == "localfire") g_localFire = a[2] == "1";
+    if (a.size() > 2 && a[1] == "aimsync") { g_aimSync = a[2] == "1"; out += Format("aim sync %d\n", (int)g_aimSync); return; }
     if (a.size() > 2 && a[1] == "hphz") g_healthHz = (float)atof(a[2].c_str());
     if (a.size() > 2 && a[1] == "npcfire") g_mirrorNpcFire = a[2] == "1";
     out += Format("npcFireMirror=%d sent=%llu applied=%llu unresolved=%llu deduped=%llu\n", (int)g_mirrorNpcFire,
                   (unsigned long long)g_npcFireSent, (unsigned long long)g_npcFireApplied,
                   (unsigned long long)g_npcFireUnresolved, (unsigned long long)g_npcFireDeduped);
+    out += Format("aimSync=%d aimSent=%llu aimApplied=%llu aimKnown=%d\n",
+                  (int)g_aimSync, (unsigned long long)g_aimSent, (unsigned long long)g_aimApplied, (int)g_aim.size());
     out += Format("routeFire=%d localFire=%d healthHz=%.0f fireSent=%llu fireApplied=%llu\n",
                   (int)g_routeFire, (int)g_localFire, g_healthHz,
                   (unsigned long long)g_fireSent, (unsigned long long)g_fireApplied);
@@ -418,6 +521,7 @@ void Register() {
     console::Register("fire", "fire [primary|secondary] [on|off] - press the local fire trigger (routes to host on a client)", CmdFire);
     console::Register("input", "input <nextprimary|prevprimary|nextsecondary|travel on/off|cruise on/off> - press a real input handler (test aid)", CmdInput);
     console::Register("combat", "combat [route 0/1|localfire 0/1|hphz N] - fire-routing status and player health", CmdCombat);
+    console::Register("aiminfo", "aiminfo - weapon FocusLocation per player (compare host vs client)", CmdAimInfo);
     console::Register("hp", "hp [Class] - health/shield ratios of pawns in the world", CmdHp);
     console::Register("lock", "lock [playerId] - acquire closest target (host: on that player's server-side pawn)", CmdLock);
     console::Register("aim", "aim [playerId] - lock closest target and point the hull at it (test aid)", CmdAim);
@@ -432,6 +536,7 @@ void OnInit() {
     { void* orig = nullptr;
       hooks::Install("UGameplayLib::ApplyESRadialDamage", es2rva::UGameplayLib_ApplyESRadialDamage, (void*)&H_ApplyESRadialDamage, &orig);
       hooks::Enable("UGameplayLib::ApplyESRadialDamage", false); }
+    hooks::Install("UWeaponComponent::TickComponent", es2rva::UWeaponComponent_TickComponent, (void*)&H_WeaponTick, (void**)&o_WeaponTick);
     hooks::Install("UWeaponComponent::StartFire", es2rva::UWeaponComponent_StartFire, (void*)&H_StartFire, (void**)&o_StartFire);
     hooks::Install("UWeaponComponent::StopFire", es2rva::UWeaponComponent_StopFire, (void*)&H_StopFire, (void**)&o_StopFire);
     hooks::Install("AESPlayerController::InputStartFirePrimary", es2rva::AESPlayerController_InputStartFirePrimary, (void*)&H_StartFirePrimary, (void**)&o_StartFirePrimary);

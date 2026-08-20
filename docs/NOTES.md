@@ -36,6 +36,18 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
 | Capacity | `maxplayers` (GameSession default 16; ES2 has no cap of its own) |
 
 ### Hard-won gotchas (each cost a crash or a silent failure)
+- **A client's shots had no aim on the host — literally NaN.** The host pulls a client's trigger, but the
+  client's server-side `UWeaponComponent` has no player behind it: `SmoothedAutoaim` takes its inputs from
+  a controller with no camera or crosshair and writes `FocusLocation` (+0x888) as `(nan, nan, nan)`.
+  `AWeaponBase::GetAimDirection` reads exactly that field, so the authoritative shot was aiming at
+  nothing. Measured live: client `(203550, -62014, 33505)` vs host `(nan, nan, nan)`. The client now
+  streams its own FocusLocation at 20 Hz and the host stamps it onto the server-side components at the
+  top of `UWeaponComponent::TickComponent` — the shot is taken earlier in that same tick than the
+  `SmoothedAutoaim` call that overwrites the field, so one write per tick is enough.
+- **Steam persona names break naive log parsing.** Once the roster carries real names, the `players`
+  table has entries like `[DC-Lan Party] DARKACE` — spaces and brackets — so a `(\S+)` name column
+  silently matches nothing and the harness reports "no client player registered".
+
 - **`TSubclassOf` really is passed indirectly.** `UWidgetBlueprintLibrary::Create` opens with
   `mov rbp, qword ptr [rdx]` — it dereferences the class argument. Passing the `UClass*` by value makes
   it read the pointer as an address and return null ("CreateWidget failed"). Pass `&theClass`.
@@ -104,7 +116,9 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
   now ~16 s (was ~29 s): ~12 s waiting on the HELLO/WELCOME handshake and ~4 s for the 54-chunk blob.
   Neither HELLO nor the loadout export needs a pawn — the export reads this process's UPlayerData —
   and both used to wait for one. The remaining ~12 s is the handshake itself, not the transfer.
-- **Only weapon *trigger* state is mirrored.** Aim direction, target lock and NPC movement still come from whatever the client's own copy of the actor is doing, so mirrored fire is visually plausible rather than frame-exact.
+- **NPC fire is still trigger-only.** A client's own fire is now aimed accurately (its FocusLocation is
+  streamed to the host), but mirrored *NPC* fire still uses whatever the client's local copy of that NPC
+  is pointing at, and neither auto-aim target nor missile lock is synced for any shooter.
 - **XP not yet observed firing.** The path is implemented and armed, but the harness cannot reliably make a parked ship land a kill, so no live award has been measured.
 - **Docking, stations, and mission *item* rewards** are not mirrored; `UMissionLib::AddNonItemRewards` is mapped (XP + credits + job score — it does *not* grant faction standing) but not yet hooked.
 - **Mission records that only one side has.** The client applies deltas to existing `FTaskSaveGameData` records; creating one from scratch (320 bytes with TArray/TMap members) is deliberately not attempted.

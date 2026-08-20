@@ -303,10 +303,6 @@ namespace es2off {
     constexpr uint32_t bStartPlayersAsSpectators = 0x328; // unsigned : 1 @bit1 (size 4) from AGameModeBase
     constexpr uint32_t bPauseable = 0x328; // unsigned : 1 @bit2 (size 4) from AGameModeBase
   }
-  namespace UActorComponent {
-    constexpr uint32_t __size = 160;
-    constexpr uint32_t OwnerPrivate = 0x90; // AActor * (size 8) from UActorComponent
-  }
   namespace UNetDriver {
     constexpr uint32_t __size = 2256;
     constexpr uint32_t GuidCache = 0x1B8; // TSharedPtr<FNetGUIDCache,1> (size 16) from UNetDriver
@@ -518,12 +514,23 @@ namespace es2off {
     constexpr uint32_t WeaponClass = 0x8; // TSoftClassPtr<AWeaponBase> (size 40) from FWeaponInfo
     constexpr uint32_t SpawnedWeapons = 0x30; // TArray<AWeaponBase *,TSizedDefaultAllocator<32> > (size 16) from FWeaponInfo
   }
+  namespace UActorComponent {
+    constexpr uint32_t __size = 160;
+    constexpr uint32_t OwnerPrivate = 0x90; // AActor * (size 8) from UActorComponent
+  }
   namespace UWeaponComponent {
     constexpr uint32_t __size = 2512;
     constexpr uint32_t WeaponSlots = 0x238; // TArray<FWeaponInfo,TSizedDefaultAllocator<32> > (size 16) from UWeaponComponent
     constexpr uint32_t WeaponSockets = 0x258; // TArray<FName,TSizedDefaultAllocator<32> > (size 16) from UWeaponComponent
     constexpr uint32_t WeaponCategory = 0x230; // TEnumAsByte<enum EWeaponCategory::Type> (size 1) from UWeaponComponent
     constexpr uint32_t EquippedSlotIndex = 0x8D0; // int (size 4) from UWeaponComponent
+    constexpr uint32_t FocusLocation = 0x888; // UE::Math::TVector<double> (size 24) from UWeaponComponent
+    constexpr uint32_t ClampedNonAutoAimedFocusLocation = 0x870; // UE::Math::TVector<double> (size 24) from UWeaponComponent
+    constexpr uint32_t CurrentAutoAimTarget = 0x728; // AActor * (size 8) from UWeaponComponent
+    constexpr uint32_t OverrideShootAtTarget = 0x720; // TWeakObjectPtr<AActor,FWeakObjectPtr> (size 8) from UWeaponComponent
+    constexpr uint32_t bUseAutoAiming = 0x288; // bool (size 1) from UWeaponComponent
+    constexpr uint32_t bShootWeaponsAtFocusLocation = 0x26A; // bool (size 1) from UWeaponComponent
+    constexpr uint32_t FocusPointDistance = 0x280; // float (size 4) from UWeaponComponent
   }
   namespace UDeviceComponent {
     constexpr uint32_t __size = 512;
