@@ -750,48 +750,90 @@ static void HostNpcHpTick(float dt) {
 // flushed at 10 Hz, which is also how ES2 itself presents sustained fire.
 static uint64_t g_dmgSent = 0, g_dmgShown = 0;
 static bool g_dmgNumbers = true;
-struct DmgAccum { float shield = 0, armor = 0, hull = 0; bool crit = false; };
-static std::map<int, std::map<uint64_t, DmgAccum>> g_dmgPending;   // player id -> victim guid -> sum
+static bool g_dmgDebug = false;
+// One entry per HIT, not per victim. Summing hits made the client draw 3.28 where ES2 would have drawn
+// 1.73 and 1.55 -- the number stopped matching the weapon. Individual events are kept and the rate is
+// bounded instead; only when a shooter genuinely outruns the budget (a constant beam, which calls this
+// every tick) do hits merge, which is what ES2 does for beams anyway.
+struct DmgEvent { uint64_t guid; float shield, armor, hull; bool crit, kill; };
+static std::map<int, std::vector<DmgEvent>> g_dmgQueue;            // player id -> pending hits
 static double g_dmgFlushIn = 0;
+static uint64_t g_dmgMerged = 0;
+static constexpr size_t kDmgQueueMax = 8;      // per player; beyond this, merge into the same victim
+static constexpr int    kDmgPerFlush = 2;      // 20 Hz flush -> at most 40 messages/s per player
 
 using Fn_DamageDealt = void (*)(UObject* hpComp, float amount, void* instigator, AActor* causer,
                                 AActor* victim, const void* hit, bool bCritical, bool bRadial);
 static Fn_DamageDealt o_DamageDealt = nullptr;
 
 static void H_DamageDealt(UObject* hpComp, float amount, void* instigator, AActor* causer,
-                          AActor* victim, const void* hit, bool bCritical, bool bRadial) {
-    o_DamageDealt(hpComp, amount, instigator, causer, victim, hit, bCritical, bRadial);
-    if (!g_dmgNumbers || amount <= 0.f || !hpComp || !victim || !causer) return;
-    players::Player* pl = players::ByPawn(causer);
+                          AActor* victim, const void* hit, bool bCritical, bool bIsKill) {
+    o_DamageDealt(hpComp, amount, instigator, causer, victim, hit, bCritical, bIsKill);
+    if (!g_dmgNumbers || amount <= 0.f || !hpComp || !victim) return;
+    // Attribute through the INSTIGATOR, which is what ES2 itself does (it reads AController::Pawn at
+    // +0x2E8 and compares that with the local player). The causer is only the pawn for instant-hit
+    // weapons; for anything that launches something it is the projectile actor, so attributing by
+    // causer silently dropped every projectile hit -- exactly the weapons whose numbers went missing.
+    players::Player* pl = nullptr;
+    if (instigator && IsValidObject((UObject*)instigator)) {
+        pl = players::ByController((APlayerController*)instigator);
+        if (!pl) {
+            AActor* ipawn = UE_FIELD(AActor*, instigator, es2off::AController::Pawn);
+            if (ipawn) pl = players::ByPawn(ipawn);
+        }
+    }
+    if (!pl && causer) pl = players::ByPawn(causer);        // instant-hit weapons pass the pawn
+    // Logged BEFORE the local filter so a host hit and a client hit can be compared side by side --
+    // that is what tells you whether a client's routed fire deals the damage its own weapon claims.
+    if (g_dmgDebug) {
+        LOGF("[dmg] %-6s amount=%.2f comp=%s crit=%d kill=%d causer=%s victim=%s",
+             pl ? (pl->local ? "HOST" : "CLIENT") : "other", amount,
+             GetObjectClassName(hpComp).c_str(), (int)bCritical, (int)bIsKill,
+             GetName((UObject*)causer).c_str(), GetName((UObject*)victim).c_str());
+    }
     if (!pl || pl->local || !pl->pc) return;            // the host's own damage: ES2 already drew it
     uint64_t guid = NetGuidOf((const UObject*)victim);
     if (!guid) return;
-    auto& byVictim = g_dmgPending[pl->id];
-    if (byVictim.size() >= 16 && byVictim.find(guid) == byVictim.end()) return;   // absurd fan-out guard
-    DmgAccum& a = byVictim[guid];
+    auto& q = g_dmgQueue[pl->id];
+    DmgEvent* e = nullptr;
+    if (q.size() < kDmgQueueMax) {
+        q.push_back(DmgEvent{guid, 0, 0, 0, false, false});
+        e = &q.back();
+    } else {
+        // Over budget: fold into the newest hit on the same victim rather than dropping it.
+        for (auto it = q.rbegin(); it != q.rend(); ++it) if (it->guid == guid) { e = &*it; break; }
+        if (!e) return;
+        ++g_dmgMerged;
+    }
     // Mirror ES2's own split: the single amount belongs to whichever layer took it.
-    if (IsA(hpComp, FindClass("ShieldComponent")))      a.shield += amount;
-    else if (IsA(hpComp, FindClass("ArmorComponent")))  a.armor  += amount;
-    else                                                a.hull   += amount;
-    a.crit = a.crit || bCritical;
+    if (IsA(hpComp, FindClass("ShieldComponent")))      e->shield += amount;
+    else if (IsA(hpComp, FindClass("ArmorComponent")))  e->armor  += amount;
+    else                                                e->hull   += amount;
+    e->crit = e->crit || bCritical;
+    e->kill = e->kill || bIsKill;
 }
 
 // Host: drain the accumulator. Runs on the game thread, never from a message handler.
 static void HostDamageNumbersTick(float dt) {
-    if (g_dmgPending.empty()) return;
+    if (g_dmgQueue.empty()) return;
     g_dmgFlushIn -= dt;
     if (g_dmgFlushIn > 0) return;
-    g_dmgFlushIn = 0.1;                                  // 10 Hz
-    for (auto& [id, byVictim] : g_dmgPending) {
+    g_dmgFlushIn = 0.05;                                 // 20 Hz
+    for (auto& [id, q] : g_dmgQueue) {
         players::Player* pl = players::ById(id);
-        if (!pl || !pl->pc) continue;
-        for (auto& [guid, a] : byVictim) {
-            coop::SendToClient(pl->pc, Format("DM|%llu|%.1f|%.1f|%.1f|%d", (unsigned long long)guid,
-                                              a.shield, a.armor, a.hull, (int)a.crit));
+        if (!pl || !pl->pc) { q.clear(); continue; }
+        int sent = 0;
+        auto it = q.begin();
+        for (; it != q.end() && sent < kDmgPerFlush; ++it, ++sent) {
+            if (g_dmgDebug)
+                LOGF("[dmg] flush shield=%.2f armor=%.2f hull=%.2f crit=%d kill=%d",
+                     it->shield, it->armor, it->hull, (int)it->crit, (int)it->kill);
+            coop::SendToClient(pl->pc, Format("DM|%llu|%.1f|%.1f|%.1f|%d|%d", (unsigned long long)it->guid,
+                                              it->shield, it->armor, it->hull, (int)it->crit, (int)it->kill));
             ++g_dmgSent;
         }
+        q.erase(q.begin(), it);                          // anything left rides the next flush
     }
-    g_dmgPending.clear();
 }
 
 // Client: PC -> MyHUD is the AESHUD; its IngameHudWidget owns the pooled text panel that draws numbers.
@@ -811,14 +853,14 @@ static bool FindDamageWidgets(UObject** hudOut, UObject** panelOut) {
     return true;
 }
 
-struct PendingDmg { uint64_t guid; float shield, armor, hull; bool crit; };
+struct PendingDmg { uint64_t guid; float shield, armor, hull; bool crit, kill; };
 static std::vector<PendingDmg> g_pendingDmg;
 
 static bool ApplyDamageNumbers(const std::string& body) {
     if (!g_dmgNumbers) return true;
-    unsigned long long guid = 0; float sh = 0, ar = 0, hu = 0; int crit = 0;
-    if (sscanf(body.c_str(), "%llu|%f|%f|%f|%d", &guid, &sh, &ar, &hu, &crit) != 5) return true;
-    if (g_pendingDmg.size() < 64) g_pendingDmg.push_back({guid, sh, ar, hu, crit != 0});
+    unsigned long long guid = 0; float sh = 0, ar = 0, hu = 0; int crit = 0, kill = 0;
+    if (sscanf(body.c_str(), "%llu|%f|%f|%f|%d|%d", &guid, &sh, &ar, &hu, &crit, &kill) != 6) return true;
+    if (g_pendingDmg.size() < 64) g_pendingDmg.push_back({guid, sh, ar, hu, crit != 0, kill != 0});
     return true;
 }
 
@@ -840,7 +882,9 @@ void ClientDamageNumbersTick(float) {
         parms.Target = victim; parms.bIsCritical = d.crit;
         parms.Shield = d.shield; parms.Armor = d.armor; parms.Hull = d.hull;
         ProcessEvent(panel, addText, &parms);
-        if (marker) { bool bIsKill = false; ProcessEvent(hud, marker, &bIsKill); }   // the hitmarker
+        // OnPlayerDealtDamage's parameter is the kill-confirm bit -- ES2 gets it from
+        // UHealthComponent::IsDead() at the call site, so pass the real thing rather than a flat false.
+        if (marker) { bool bIsKill = d.kill; ProcessEvent(hud, marker, &bIsKill); }
         ++g_dmgShown;
     }
 }
@@ -1244,6 +1288,7 @@ static void CmdCombat(const console::Args& a, std::string& out) {
     // Diagnostic only: the block is normally driven purely by role. Lifting it lets a client run ES2's
     // real damage path, which is how the impact/hitmarker/destruction visuals are produced -- and also
     // how it reaches the null AESGameModeBase. Useful for measuring exactly where that path dies.
+    if (a.size() > 2 && a[1] == "dmgdebug") { g_dmgDebug = a[2] == "1"; out += Format("dmg debug %d\n", (int)g_dmgDebug); return; }
     if (a.size() > 2 && a[1] == "dmgnumbers") { g_dmgNumbers = a[2] == "1"; out += Format("damage numbers %d\n", (int)g_dmgNumbers); return; }
     if (a.size() > 2 && a[1] == "damageblock") { SetClientDamageBlock(a[2] == "1"); out += Format("client damage block %s\n", a[2].c_str()); return; }
     if (a.size() > 2 && a[1] == "npchp") { g_npcHpSync = a[2] == "1"; out += Format("npc hp sync %d\n", (int)g_npcHpSync); return; }
@@ -1265,8 +1310,8 @@ static void CmdCombat(const console::Args& a, std::string& out) {
                   (unsigned long long)g_lockApplied, (unsigned long long)g_guidScans);
     out += Format("npcAimSync=%d npcAimSent=%llu npcAimApplied=%llu npcAimTracked=%d\n",
                   (int)g_npcAimSync, (unsigned long long)g_npcAimSent, (unsigned long long)g_npcAimApplied, (int)g_npcAim.size());
-    out += Format("dmgNumbers=%d dmgSent=%llu dmgShown=%llu\n", (int)g_dmgNumbers,
-                  (unsigned long long)g_dmgSent, (unsigned long long)g_dmgShown);
+    out += Format("dmgNumbers=%d dmgSent=%llu dmgShown=%llu dmgMerged=%llu\n", (int)g_dmgNumbers,
+                  (unsigned long long)g_dmgSent, (unsigned long long)g_dmgShown, (unsigned long long)g_dmgMerged);
     out += Format("npcDeathFx=%d deathsSent=%llu deathsPlayed=%llu\n", (int)g_npcDeathFx,
                   (unsigned long long)g_npcDeathsSent, (unsigned long long)g_npcDeathsPlayed);
     out += Format("npcHpSync=%d npcHpSent=%llu npcHpApplied=%llu\n", (int)g_npcHpSync,

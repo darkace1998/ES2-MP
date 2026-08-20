@@ -189,6 +189,24 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
   was left to draw it. The host now forwards each hit (`DM`) and the client draws it with ES2's own
   `UPooledHUDTextPanel::AddDamageTextWithActor`. Coalesce before sending — a beam weapon calls this
   every tick and one reliable RPC per call is the flood that used to kill clients.
+- **`DamageCauser` is not the shooter.** In `DamageDealtByPlayerOrPlayerFriend(hpComp, amount,
+  instigator, causer, victim, hit, bIsCritical, bIsKill)` the causer is whatever physically delivered
+  the hit: the pawn for some instant-hit paths, but the WEAPON actor (`BP_Weapon_CoilGun`) or the
+  PROJECTILE (`BP_Projectile_Autocannon`) for everything else. Attributing by causer silently drops
+  those hits. ES2 itself attributes through the instigator — it reads `AController::Pawn` (+0x2E8) and
+  compares that with `GetPlayerPawn(world, 0)` — so do the same, with the causer only as a fallback.
+- The last parameter is **`bIsKill`, not a radial-damage flag**: at the call site in
+  `UHealthComponent::TakeDamage` it is `UHealthComponent::IsDead()`'s return, stored to `[rsp+0x38]`
+  (the 8th argument). It is what `AESHUD::OnPlayerDealtDamage` wants for the kill-confirm marker.
+  The same stack frame confirms argument 5 is the victim: it is `[hpComp+0x90]`, the component's owner.
+- **Do not sum damage events to save bandwidth.** Coalescing per victim at 10 Hz made the client draw
+  3.28 where ES2 would have drawn 1.73 and then 1.55, and the number visibly stopped matching the
+  weapon. Keep one message per hit and bound the RATE instead (queue per player, drain a couple per
+  flush); merge only when a shooter genuinely outruns the budget, which is what ES2 does for constant
+  beams anyway.
+- Shield damage and hull damage are separate weapon stats and differ by more than an order of magnitude
+  — measured on one coil gun, ~1.7 per shield hit against ~36 per hull hit. A small number on screen is
+  usually a shield hit, not a bug.
 - **Damage numbers are pooled, not spawned**, which is why diffing live widget classes across a hit
   finds nothing. The pool is `WG_Ingame_HUD_C -> PooledHudText`; `ActiveTexts` (non-empty for about a
   second) is the observable that tells you a number is on screen.
