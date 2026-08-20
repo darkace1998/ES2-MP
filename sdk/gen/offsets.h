@@ -508,6 +508,28 @@ namespace es2off {
     constexpr uint32_t WeaponSockets = 0x258; // TArray<FName,TSizedDefaultAllocator<32> > (size 16) from UWeaponComponent
     constexpr uint32_t WeaponCategory = 0x230; // TEnumAsByte<enum EWeaponCategory::Type> (size 1) from UWeaponComponent
   }
+  namespace UDeviceComponent {
+    constexpr uint32_t __size = 512;
+    constexpr uint32_t DeviceSlots = 0xA0; // TArray<FDeviceInfo,TSizedDefaultAllocator<32> > (size 16) from UDeviceComponent
+    constexpr uint32_t SelectedDeviceIndex = 0xB0; // int (size 4) from UDeviceComponent
+  }
+  namespace UConsumableComponent {
+    constexpr uint32_t __size = 408;
+    constexpr uint32_t ConsumableSlots = 0xA0; // TArray<FConsumableInfo,TSizedDefaultAllocator<32> > (size 16) from UConsumableComponent
+    constexpr uint32_t SelectedConsumableIndex = 0xB0; // int (size 4) from UConsumableComponent
+  }
+  namespace FDeviceInfo {
+    constexpr uint32_t __size = 24;
+    constexpr uint32_t DeviceItem = 0x0; // UItem * (size 8) from FDeviceInfo
+    constexpr uint32_t DeviceClass = 0x8; // TSubclassOf<ADeviceBase> (size 8) from FDeviceInfo
+    constexpr uint32_t SpawnedDevice = 0x10; // ADeviceBase * (size 8) from FDeviceInfo
+  }
+  namespace FConsumableInfo {
+    constexpr uint32_t __size = 24;
+    constexpr uint32_t ConsumableItem = 0x0; // UItem * (size 8) from FConsumableInfo
+    constexpr uint32_t ConsumableClass = 0x8; // TSubclassOf<AConsumableBase> (size 8) from FConsumableInfo
+    constexpr uint32_t DefaultConsumableObject = 0x10; // AConsumableBase * (size 8) from FConsumableInfo
+  }
   namespace UInventory {
     constexpr uint32_t __size = 240;
     constexpr uint32_t PrimaryWeapons = 0x38; // TArray<UItem *,TSizedDefaultAllocator<32> > (size 16) from UInventory

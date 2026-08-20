@@ -600,13 +600,78 @@ static void CmdShipData(const console::Args& a, std::string& out) {
                 else out += Format("    [%d] (empty)\n", i);
             }
         }
+    } else if (sub == "devices") {
+        // The equipment half of "the client can't equip anything": UDeviceComponent::Init and
+        // UConsumableComponent::InitializeComponent fill these from ShipData.Inventory during
+        // PostInitializeComponents. Empty slots here mean the ship data arrived too late.
+        APlayerController* pc = GetFirstLocalPlayerController(GetWorld());
+        AActor* pawn = nullptr;
+        if (a.size() > 2 && a[2].rfind("0x", 0) == 0) pawn = (AActor*)strtoull(a[2].c_str(), nullptr, 16);
+        else if (pc) pawn = UE_FIELD(AActor*, pc, es2off::AController::Pawn);
+        if (!pawn || !IsValidObject((UObject*)pawn)) { out += "no pawn\n"; return; }
+        out += Format("pawn %s\n", GetName((UObject*)pawn).c_str());
+
+        struct RawArray { char* Data; int32_t Num; int32_t Max; };
+        auto listSlots = [&](const char* label, UObject* comp, uint32_t arrOff, uint32_t itemOff) {
+            if (!comp) { out += Format("  %s: (no component)\n", label); return; }
+            RawArray& slots = UE_FIELD(RawArray, comp, arrOff);
+            out += Format("  %s: %d slot(s)\n", label, slots.Num);
+            for (int i = 0; i < slots.Num && i < 8; ++i) {
+                UObject* item = UE_FIELD(UObject*, slots.Data + (size_t)i * 24, itemOff);   // sizeof(FDeviceInfo)==sizeof(FConsumableInfo)==24
+                if (item && IsValidObject(item))
+                    out += Format("    [%d] %-22s level=%d rarity=%d\n", i,
+                                  UE_FIELD(FName, item, es2off::UItem::ItemTemplateID).ToString().c_str(),
+                                  UE_FIELD(int32_t, item, es2off::UItem::ItemLevel),
+                                  (int)UE_FIELD(uint8_t, item, es2off::UItem::Rarity));
+                else out += Format("    [%d] (empty)\n", i);
+            }
+        };
+        // Find the components by class rather than by property name, so this does not depend on
+        // which Blueprint ship variant the player is flying.
+        UObject *dev = nullptr, *con = nullptr;
+        for (auto& pr : GetProperties((UStruct*)GetClass((UObject*)pawn), true)) {
+            // Only real object properties: reading an arbitrary offset as a UObject* and
+            // validating it dereferences garbage and takes the process down.
+            if (pr.TypeName.find("ObjectProperty") == std::string::npos || pr.ElementSize != 8) continue;
+            UObject* v = UE_FIELD(UObject*, pawn, pr.Offset);
+            if (!v || !IsValidObject(v)) continue;
+            std::string cn = ue::GetObjectClassName(v);
+            if (!dev && cn.find("DeviceComponent") != std::string::npos) dev = v;
+            if (!con && cn.find("ConsumableComponent") != std::string::npos) con = v;
+        }
+        listSlots("Devices", dev, es2off::UDeviceComponent::DeviceSlots, es2off::FDeviceInfo::DeviceItem);
+        listSlots("Consumables", con, es2off::UConsumableComponent::ConsumableSlots, es2off::FConsumableInfo::ConsumableItem);
+
+        // and the ship item itself, which is what the equipment UI hangs everything off
+        void* sd = reinterpret_cast<char*>(pawn) + es2off::AESPawn::ShipData;
+        UObject* shipItem = UE_FIELD(UObject*, sd, es2off::FShipData::ShipItemInstance);
+        UObject* inv = UE_FIELD(UObject*, sd, es2off::FShipData::Inventory);
+        // What the components were *supposed* to read: the inventory arrays themselves.
+        if (inv && IsValidObject(inv)) {
+            RawArray& d = UE_FIELD(RawArray, inv, es2off::UInventory::Devices);
+            RawArray& c = UE_FIELD(RawArray, inv, es2off::UInventory::Consumables);
+            out += Format("  Inventory.Devices=%d Consumables=%d\n", d.Num, c.Num);
+            for (int i = 0; i < d.Num && i < 8; ++i) {
+                UObject* it = ((UObject**)d.Data)[i];
+                out += Format("    inv.dev[%d] %s\n", i, it && IsValidObject(it)
+                              ? UE_FIELD(FName, it, es2off::UItem::ItemTemplateID).ToString().c_str() : "NULL");
+            }
+            for (int i = 0; i < c.Num && i < 8; ++i) {
+                UObject* it = ((UObject**)c.Data)[i];
+                out += Format("    inv.con[%d] %s\n", i, it && IsValidObject(it)
+                              ? UE_FIELD(FName, it, es2off::UItem::ItemTemplateID).ToString().c_str() : "NULL");
+            }
+        }
+        out += Format("  ShipItemInstance: %s | Inventory: %s\n",
+                      shipItem && IsValidObject(shipItem) ? UE_FIELD(FName, shipItem, es2off::UItem::ItemTemplateID).ToString().c_str() : "NULL",
+                      inv && IsValidObject(inv) ? GetName(inv).c_str() : "NULL");
     } else if (sub == "on")  { g_enabled = true;  out += "loadout substitution ON\n"; }
     else if (sub == "off") { g_enabled = false; out += "loadout substitution OFF\n"; }
-    else out += "usage: shipdata [info|export|send|stash|on|off]\n";
+    else out += "usage: shipdata [info|export|send|stash|apply <id>|weapons|devices|local|tweak <a> <b>|on|off]\n";
 }
 
 void Register() {
-    console::Register("shipdata", "shipdata [info|export|send|stash|apply <id>|on|off] - per-player ship loadout", CmdShipData);
+    console::Register("shipdata", "shipdata [info|export|send|stash|apply <id>|weapons|devices|local|on|off] - per-player ship loadout", CmdShipData);
     console::Register("ships", "ships [index] - list the ships this player owns / pick the one to fly", CmdShips);
 }
 
