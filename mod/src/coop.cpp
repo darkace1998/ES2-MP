@@ -15,6 +15,7 @@
 #include "travel.h"
 #include "world_state.h"
 #include "loot.h"
+#include "respawn.h"
 #include <windows.h>
 #include <cmath>
 #include <cstring>
@@ -276,6 +277,7 @@ bool OnClientMessage(APlayerController* toPC, const std::string& raw) {
     if (travel::OnClientOp(op, body)) return true;
     if (world_state::OnClientOp(op, body)) return true;
     if (loot::OnClientOp(op, body)) return true;
+    if (respawn::OnClientOp(op, body)) return true;
     LOGF("[coop] unhandled host op '%s'", op.c_str());
     return true;
 }
@@ -333,6 +335,7 @@ static void Tick(float dt) {
         combat::Tick(dt, true);
         loadout::HostTick(dt);
         world_state::Tick(dt, true);
+        respawn::Tick(dt, true);
     } else if (r == Role::Client) {
         // The first HELLO can be dropped if it beats the connection into steady state; retry until acknowledged.
         if (!g_welcomed && LocalPawn()) {
