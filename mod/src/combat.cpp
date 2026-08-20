@@ -295,6 +295,30 @@ static void CmdFire(const console::Args& a, std::string& out) {
     out += Format("%s %s (routed=%d)\n", which ? "secondary" : "primary", down ? "DOWN" : "UP", (int)(IsClient() && g_routeFire));
 }
 
+// input <what> — call ES2's own native input handlers on the local controller. They are not
+// UFunctions, so the console's `call` cannot reach them; this is the only faithful way to exercise a
+// weapon swap or a travel/cruise charge from a test without a keyboard.
+static void CmdInput(const console::Args& a, std::string& out) {
+    APlayerController* pc = LocalPC();
+    if (!pc) { out = "no local player controller\n"; return; }
+    if (a.size() < 2) { out = "usage: input <nextprimary|prevprimary|nextsecondary|travel on/off|cruise on/off>\n"; return; }
+    const std::string& what = a[1];
+    bool down = !(a.size() > 2 && (a[2] == "off" || a[2] == "0"));
+    uint32_t rva = 0;
+    if (what == "nextprimary")        rva = es2rva::AESPlayerController_InputNextPrimaryWeapon;
+    else if (what == "prevprimary")   rva = es2rva::AESPlayerController_InputPreviousPrimaryWeapon;
+    else if (what == "nextsecondary") rva = es2rva::AESPlayerController_InputNextSecondaryWeapon;
+    else if (what == "travel")        rva = down ? es2rva::AESPlayerController_InputChargeTravelMode
+                                                 : es2rva::AESPlayerController_InputChargeTravelModeReleased;
+    else if (what == "cruise")        rva = down ? es2rva::AESPlayerController_InputChargeCruiseMode
+                                                 : es2rva::AESPlayerController_InputChargeCruiseModeReleased;
+    else { out = "unknown input: " + what + "\n"; return; }
+    Rva<std::remove_pointer_t<Fn_PCVoid>>(rva)(pc);
+    out += Format("input %s%s -> %s\n", what.c_str(),
+                  (what == "travel" || what == "cruise") ? (down ? " down" : " up") : "",
+                  GetName((UObject*)pc).c_str());
+}
+
 static void CmdCombat(const console::Args& a, std::string& out) {
     if (a.size() > 2 && a[1] == "route") g_routeFire = a[2] == "1";
     if (a.size() > 2 && a[1] == "localfire") g_localFire = a[2] == "1";
@@ -392,6 +416,7 @@ static void CmdHp(const console::Args& a, std::string& out) {
 
 void Register() {
     console::Register("fire", "fire [primary|secondary] [on|off] - press the local fire trigger (routes to host on a client)", CmdFire);
+    console::Register("input", "input <nextprimary|prevprimary|nextsecondary|travel on/off|cruise on/off> - press a real input handler (test aid)", CmdInput);
     console::Register("combat", "combat [route 0/1|localfire 0/1|hphz N] - fire-routing status and player health", CmdCombat);
     console::Register("hp", "hp [Class] - health/shield ratios of pawns in the world", CmdHp);
     console::Register("lock", "lock [playerId] - acquire closest target (host: on that player's server-side pawn)", CmdLock);

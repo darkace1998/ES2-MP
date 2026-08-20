@@ -483,6 +483,44 @@ bool OnClientOp(const std::string& op, const std::string& body) {
 // Host: rebuild a player's pawn now that we have their real ship.
 using Fn_RestartPlayer = void (*)(void* gameMode, void* controller);
 using Fn_UnPossess = void (*)(void* controller);
+// ---------------------------------------------------------------- HUD rebinding
+//
+// ES2's ingame HUD widget is created under the GameInstance, not the pawn, so it outlives both a
+// ClientTravel into the host's world and the placeholder swap below. It resolves the player pawn and
+// its weapon/device/consumable components once, when it is constructed, and ES2 never rebinds it —
+// a single-player game never replaces the player pawn out from under the HUD.
+//
+// The result on a client: after we retire the placeholder ship (and after any respawn), the widget
+// still points at the destroyed pawn, so weapon swaps, the travel/cruise drive charge and the
+// device/consumable slots all stop updating while the underlying state moves normally.
+//
+// ES2 already ships the cure: WG_Ingame_HUD_C::ReInit, reachable as PC -> MyHUD -> IngameHudWidget.
+// Calling the game's own function re-resolves everything the widget cached, which is far safer than
+// re-running Construct (that would rebuild child slot widgets). The widget property is looked up by
+// reflection rather than a fixed offset so this keeps working across HUD Blueprint variants.
+// Runs for host and client alike: the host's pawn is swapped on respawn too.
+static AActor* g_lastHudPawn = nullptr;
+void HudRebindTick() {
+    UWorld* w = GetWorld();
+    APlayerController* pc = w ? GetFirstLocalPlayerController(w) : nullptr;
+    AActor* pawn = pc ? UE_FIELD(AActor*, pc, es2off::AController::Pawn) : nullptr;
+    if (!pawn || pawn == g_lastHudPawn || !IsValidObject((UObject*)pawn)) return;
+    UObject* hud = UE_FIELD(UObject*, pc, es2off::APlayerController::MyHUD);
+    if (!hud || !IsValidObject(hud)) return;          // no HUD yet: retry next tick, pawn not latched
+    UObject* widget = nullptr;
+    for (auto& p : GetProperties((UStruct*)GetClass(hud), true)) {
+        if (p.Name != "IngameHudWidget" || p.TypeName != "ObjectProperty") continue;
+        widget = UE_FIELD(UObject*, hud, p.Offset);
+        break;
+    }
+    if (!widget || !IsValidObject(widget)) return;
+    UFunction* fn = FindFunction(widget, "ReInit");
+    if (!fn) return;
+    g_lastHudPawn = pawn;
+    ProcessEvent(widget, fn, nullptr);
+    LOGF("[loadout] HUD rebound to %s", GetName((UObject*)pawn).c_str());
+}
+
 void HostTick(float dt) {
     g_hostNow += dt;
     if (g_respawn.empty()) return;
@@ -611,7 +649,10 @@ static void CmdShipData(const console::Args& a, std::string& out) {
             if (!wc) continue;
             struct RawArray { char* Data; int32_t Num; int32_t Max; };
             RawArray& slots = UE_FIELD(RawArray, wc, es2off::UWeaponComponent::WeaponSlots);
-            out += Format("  %s: %d slot(s)\n", slot, slots.Num);
+            // EquippedSlotIndex is the "which weapon am I holding" the HUD highlights — the one that
+            // has to move when a swap happens.
+            out += Format("  %s: %d slot(s), equipped=%d\n", slot, slots.Num,
+                          UE_FIELD(int32_t, wc, es2off::UWeaponComponent::EquippedSlotIndex));
             for (int i = 0; i < slots.Num && i < 8; ++i) {
                 char* wi = slots.Data + (size_t)i * 80;   // sizeof(FWeaponInfo)
                 UObject* item = UE_FIELD(UObject*, wi, es2off::FWeaponInfo::WeaponItem);

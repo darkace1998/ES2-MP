@@ -82,6 +82,13 @@ namespace es2rva {
   constexpr uint32_t AActor_GetVelocity = 0x11F2A78; // public: virtual struct UE::Math::TVector<double> __cdecl AActor::GetVelocity(void) const
   constexpr uint32_t AActor_TeleportTo = 0x16AA728; // public: virtual bool __cdecl AActor::TeleportTo(struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, bool, bool)
   constexpr uint32_t UEngine_GetGameUserSettings = 0x137F928; // public: class UGameUserSettings * __cdecl UEngine::GetGameUserSettings(void)
+  constexpr uint32_t AESPlayerController_InputNextPrimaryWeapon = 0x5E0D618; // private: void __cdecl AESPlayerController::InputNextPrimaryWeapon(void)
+  constexpr uint32_t AESPlayerController_InputPreviousPrimaryWeapon = 0x5E0D944; // private: void __cdecl AESPlayerController::InputPreviousPrimaryWeapon(void)
+  constexpr uint32_t AESPlayerController_InputNextSecondaryWeapon = 0x5E0D798; // private: void __cdecl AESPlayerController::InputNextSecondaryWeapon(void)
+  constexpr uint32_t AESPlayerController_InputChargeTravelMode = 0x5E0D0F0; // private: void __cdecl AESPlayerController::InputChargeTravelMode(void)
+  constexpr uint32_t AESPlayerController_InputChargeTravelModeReleased = 0x5E0D204; // private: void __cdecl AESPlayerController::InputChargeTravelModeReleased(void)
+  constexpr uint32_t AESPlayerController_InputChargeCruiseMode = 0x1716B8C; // private: void __cdecl AESPlayerController::InputChargeCruiseMode(void)
+  constexpr uint32_t AESPlayerController_InputChargeCruiseModeReleased = 0x1717910; // private: void __cdecl AESPlayerController::InputChargeCruiseModeReleased(void)
   constexpr uint32_t UGameplayLib_ApplyESRadialDamage = 0x16EE520; // public: static bool __cdecl UGameplayLib::ApplyESRadialDamage(class UObject const *, struct FDamageInfo, struct UE::Math::TVector<double> const &, float, class TArray<class AActor *, class TSizedDefaultAllocator<32>> const &, bool &, struct FWeaponData, class TArray<class AActor *, class TSizedDefaultAllocator<32>> &, class TArray<class AActor *, class TSizedDefaultAllocator<32>> &, class TArray<struct FHitResult, class TSizedDefaultAllocator<32>> &, float, float, class AActor *, class AController *, bool, bool, bool, bool)
   constexpr uint32_t UGameplayLib_ApplyESPointDamage = 0x1429804; // public: static struct FDamageInfo __cdecl UGameplayLib::ApplyESPointDamage(class AActor *, struct FDamageInfo, struct UE::Math::TVector<double> const &, struct FHitResult const &, class AController *, class AActor *, bool &, struct FWeaponData, float, float, bool)
   constexpr uint32_t FNetGUIDCache_GetNetGUID = 0x4D91A4C; // public: class FNetworkGUID __cdecl FNetGUIDCache::GetNetGUID(class UObject const *) const

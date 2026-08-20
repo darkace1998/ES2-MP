@@ -329,6 +329,7 @@ static void Tick(float dt) {
     travel::Tick(dt, r == Role::Host);
     if (r == Role::None) return;
     players::Refresh();
+    loadout::HudRebindTick();   // the HUD caches the pawn; it must follow every pawn swap
     if (r == Role::Host) {
         g_sweepAccum += dt;
         if (g_sweepAccum > 0.5) { g_sweepAccum = 0; RelevancySweep(); }

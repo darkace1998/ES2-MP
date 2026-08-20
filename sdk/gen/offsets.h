@@ -507,6 +507,7 @@ namespace es2off {
     constexpr uint32_t WeaponSlots = 0x238; // TArray<FWeaponInfo,TSizedDefaultAllocator<32> > (size 16) from UWeaponComponent
     constexpr uint32_t WeaponSockets = 0x258; // TArray<FName,TSizedDefaultAllocator<32> > (size 16) from UWeaponComponent
     constexpr uint32_t WeaponCategory = 0x230; // TEnumAsByte<enum EWeaponCategory::Type> (size 1) from UWeaponComponent
+    constexpr uint32_t EquippedSlotIndex = 0x8D0; // int (size 4) from UWeaponComponent
   }
   namespace UDeviceComponent {
     constexpr uint32_t __size = 512;

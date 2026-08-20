@@ -92,6 +92,15 @@ RVAS = {
     'AActor_TeleportTo': 'public: virtual bool __cdecl AActor::TeleportTo(struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, bool, bool)',
     'UEngine_GetGameUserSettings': 'public: class UGameUserSettings * __cdecl UEngine::GetGameUserSettings(void)',
     # ---- NPC fire mirroring ----
+    # Native input handlers (not UFunctions, so unreachable from the console `call`) — used by the
+    # `input` test command to drive weapon swap / travel / cruise exactly like a real key press.
+    'AESPlayerController_InputNextPrimaryWeapon': 'private: void __cdecl AESPlayerController::InputNextPrimaryWeapon(void)',
+    'AESPlayerController_InputPreviousPrimaryWeapon': 'private: void __cdecl AESPlayerController::InputPreviousPrimaryWeapon(void)',
+    'AESPlayerController_InputNextSecondaryWeapon': 'private: void __cdecl AESPlayerController::InputNextSecondaryWeapon(void)',
+    'AESPlayerController_InputChargeTravelMode': 'private: void __cdecl AESPlayerController::InputChargeTravelMode(void)',
+    'AESPlayerController_InputChargeTravelModeReleased': 'private: void __cdecl AESPlayerController::InputChargeTravelModeReleased(void)',
+    'AESPlayerController_InputChargeCruiseMode': 'private: void __cdecl AESPlayerController::InputChargeCruiseMode(void)',
+    'AESPlayerController_InputChargeCruiseModeReleased': 'private: void __cdecl AESPlayerController::InputChargeCruiseModeReleased(void)',
     'UGameplayLib_ApplyESRadialDamage': 'public: static bool __cdecl UGameplayLib::ApplyESRadialDamage(class UObject const *, struct FDamageInfo, struct UE::Math::TVector<double> const &, float, class TArray<class AActor *, class TSizedDefaultAllocator<32>> const &, bool &, struct FWeaponData, class TArray<class AActor *, class TSizedDefaultAllocator<32>> &, class TArray<class AActor *, class TSizedDefaultAllocator<32>> &, class TArray<struct FHitResult, class TSizedDefaultAllocator<32>> &, float, float, class AActor *, class AController *, bool, bool, bool, bool)',
     'UGameplayLib_ApplyESPointDamage': 'public: static struct FDamageInfo __cdecl UGameplayLib::ApplyESPointDamage(class AActor *, struct FDamageInfo, struct UE::Math::TVector<double> const &, struct FHitResult const &, class AController *, class AActor *, bool &, struct FWeaponData, float, float, bool)',
     'FNetGUIDCache_GetNetGUID': 'public: class FNetworkGUID __cdecl FNetGUIDCache::GetNetGUID(class UObject const *) const',
@@ -243,7 +252,7 @@ OFFSETS = {
     'APickupBase': ['PickupEntry'],
     'FPickupEntry': ['PickupClassPath', 'PickupInventory'],
     'FWeaponInfo': ['WeaponItem', 'WeaponClass', 'SpawnedWeapons'],
-    'UWeaponComponent': ['WeaponSlots', 'WeaponSockets', 'WeaponCategory'],
+    'UWeaponComponent': ['WeaponSlots', 'WeaponSockets', 'WeaponCategory', 'EquippedSlotIndex'],
     'UDeviceComponent': ['DeviceSlots', 'SelectedDeviceIndex'],
     'UConsumableComponent': ['ConsumableSlots', 'SelectedConsumableIndex'],
     'FDeviceInfo': ['DeviceItem', 'DeviceClass', 'SpawnedDevice'],
