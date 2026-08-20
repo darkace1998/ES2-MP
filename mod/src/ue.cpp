@@ -107,8 +107,8 @@ std::string GetPathName(const UObject* o) {
     Rva<std::remove_pointer_t<Fn_GetPathName>>(es2rva::UObjectBaseUtility_GetPathName)(o, nullptr, &s);
     return s.ToUtf8();
 }
-std::string GetClassName(const UObject* o) { return o ? GetName((const UObject*)GetClass(o)) : "null"; }
-std::string GetFullName(const UObject* o) { return o ? GetClassName(o) + " " + GetPathName(o) : "null"; }
+std::string GetObjectClassName(const UObject* o) { return o ? GetName((const UObject*)GetClass(o)) : "null"; }
+std::string GetFullName(const UObject* o) { return o ? GetObjectClassName(o) + " " + GetPathName(o) : "null"; }
 bool IsChildOf(const UStruct* s, const UStruct* base) {
     if (!s || !base) return false;
     return Rva<std::remove_pointer_t<Fn_IsChildOf>>(es2rva::UStruct_IsChildOf)(s, base);

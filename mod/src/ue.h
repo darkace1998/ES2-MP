@@ -91,7 +91,7 @@ inline UObject* GetDefaultObject(const UClass* c) { return UE_FIELDC(UObject*, c
 std::string GetName(const UObject* o);
 std::string GetPathName(const UObject* o);
 std::string GetFullName(const UObject* o);          // "ClassName /Path/To.Object"
-std::string GetClassName(const UObject* o);
+std::string GetObjectClassName(const UObject* o);
 bool IsChildOf(const UStruct* s, const UStruct* base);
 bool IsA(const UObject* o, const UClass* cls);
 bool IsValidObject(const UObject* o);              // pointer is in GUObjectArray and not garbage

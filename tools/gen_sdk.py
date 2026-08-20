@@ -91,6 +91,11 @@ RVAS = {
     'AActor_GetVelocity': 'public: virtual struct UE::Math::TVector<double> __cdecl AActor::GetVelocity(void) const',
     'AActor_TeleportTo': 'public: virtual bool __cdecl AActor::TeleportTo(struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, bool, bool)',
     'UEngine_GetGameUserSettings': 'public: class UGameUserSettings * __cdecl UEngine::GetGameUserSettings(void)',
+    # ---- steam p2p ----
+    'FOnlineFactorySteam_SteamSingleton': 'private: static class TSharedPtr<class FOnlineSubsystemSteam, 1> FOnlineFactorySteam::SteamSingleton',
+    'FSocketSubsystemSteam_SocketSingleton': 'protected: static class FSocketSubsystemSteam *FSocketSubsystemSteam::SocketSingleton',
+    'FOnlineSessionSteam_GetNumSessions': 'public: virtual int __cdecl FOnlineSessionSteam::GetNumSessions(void)',
+    'FOnlineIdentitySteam_GetUniquePlayerId': 'public: virtual class TSharedPtr<class FUniqueNetId const, 1> __cdecl FOnlineIdentitySteam::GetUniquePlayerId(int) const',
     # ---- death / respawn ----
     'AController_Possess': 'public: virtual void __cdecl AController::Possess(class APawn *)',
     'UHealthComponent_SetCurrentHitpointsWithRatio': 'public: virtual void __cdecl UHealthComponent::SetCurrentHitpointsWithRatio(float)',
@@ -206,6 +211,7 @@ OFFSETS = {
     'AESPlayerController': [],
     'AESGameModeBase': ['ESPlayerPawn', 'ESPlayerController', 'PlayerData'],
     'UESGameInstance': ['bUseWorldOriginShifting', 'WorldOriginShiftingStack'],
+    'FOnlineSubsystemSteam': ['bSteamworksClientInitialized', 'SessionInterface', 'IdentityInterface'],
     'UPlayerData': ['Ships', 'ShipsSaveState', 'CurrentShip', 'CompletedMissions', 'TrackedMainMission', 'TrackedSideMission', 'TrackedJob'],
     'FTaskSaveGameData': ['TaskID', 'TaskState', 'Stage', 'Progress', 'LocationID', 'StationID', 'TimeStamp', 'bIsMission'],
     'AMissionBase': ['MissionTaskID'],

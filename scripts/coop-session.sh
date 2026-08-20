@@ -6,9 +6,10 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-SAVE="ES2__AUTO_2023.04.08-23.33.57"; HOST_ONLY=0; CONNECT=1; NULLRHI_HOST=""; KILL=0
+SAVE="ES2__AUTO_2023.04.08-23.33.57"; HOST_ONLY=0; CONNECT=1; NULLRHI_HOST=""; KILL=0; STEAM=0
 while [[ $# -gt 0 ]]; do case "$1" in
-  --host-only) HOST_ONLY=1;; --no-connect) CONNECT=0;; --nullrhi-host) NULLRHI_HOST="--nullrhi";; --save) SAVE="$2"; shift;; --kill) KILL=1;; *) echo "unknown arg $1"; exit 1;; esac; shift; done
+  --host-only) HOST_ONLY=1;; --no-connect) CONNECT=0;; --nullrhi-host) NULLRHI_HOST="--nullrhi";; --save) SAVE="$2"; shift;;
+  --steam) STEAM=1;; --kill) KILL=1;; *) echo "unknown arg $1"; exit 1;; esac; shift; done
 con() { python3 "$ROOT/scripts/console.py" "$@"; }
 wait_world() { # port world timeout
   local port=$1 want=$2 t=${3:-180} i=0
@@ -28,7 +29,13 @@ wait_console 27100 240 || exit 1
 sleep 20
 echo "### host: load save $SAVE"; con 27100 "call UserFunctionsLib LoadGame world $SAVE 0"
 wait_world 27100 S01ML01 240 || exit 1; sleep 8
+if [[ $STEAM == 1 ]]; then
+  # Steam transport must be selected BEFORE the first listen: EnableListenServer only creates a net
+  # driver when the world has none, so a later switch is silently ignored.
+  echo "### host: Steam P2P transport"; con 27100 "netdriver steam" | tail -1; con 27100 "steam host 1" >/dev/null
+fi
 echo "### host: listen"; con 27100 listen 7777 | tail -1
+[[ $STEAM == 1 ]] && con 27100 steam | sed -n '7,12p' 
 [[ $HOST_ONLY == 1 ]] && exit 0
 
 echo "### client: launch"; scripts/launch.sh client --port 27101 --res 1280x720

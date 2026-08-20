@@ -82,6 +82,10 @@ namespace es2rva {
   constexpr uint32_t AActor_GetVelocity = 0x11F2A78; // public: virtual struct UE::Math::TVector<double> __cdecl AActor::GetVelocity(void) const
   constexpr uint32_t AActor_TeleportTo = 0x16AA728; // public: virtual bool __cdecl AActor::TeleportTo(struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, bool, bool)
   constexpr uint32_t UEngine_GetGameUserSettings = 0x137F928; // public: class UGameUserSettings * __cdecl UEngine::GetGameUserSettings(void)
+  constexpr uint32_t FOnlineFactorySteam_SteamSingleton = 0x9B38338; // private: static class TSharedPtr<class FOnlineSubsystemSteam, 1> FOnlineFactorySteam::SteamSingleton
+  constexpr uint32_t FSocketSubsystemSteam_SocketSingleton = 0x9E62260; // protected: static class FSocketSubsystemSteam *FSocketSubsystemSteam::SocketSingleton
+  constexpr uint32_t FOnlineSessionSteam_GetNumSessions = 0x52AF31C; // public: virtual int __cdecl FOnlineSessionSteam::GetNumSessions(void)
+  constexpr uint32_t FOnlineIdentitySteam_GetUniquePlayerId = 0x52B0AB4; // public: virtual class TSharedPtr<class FUniqueNetId const, 1> __cdecl FOnlineIdentitySteam::GetUniquePlayerId(int) const
   constexpr uint32_t AController_Possess = 0x16ACD68; // public: virtual void __cdecl AController::Possess(class APawn *)
   constexpr uint32_t UHealthComponent_SetCurrentHitpointsWithRatio = 0x1556948; // public: virtual void __cdecl UHealthComponent::SetCurrentHitpointsWithRatio(float)
   constexpr uint32_t UUserFunctionsLib_LoadGame = 0x5E89DD4; // public: static void __cdecl UUserFunctionsLib::LoadGame(class UObject const *, class FString, int)

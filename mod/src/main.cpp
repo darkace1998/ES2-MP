@@ -17,6 +17,7 @@ namespace net { void Register(); void OnInit(); }
 #include "loot.h"
 #include "respawn.h"
 #include "attribution.h"
+#include "steamp2p.h"
 
 namespace {
 HMODULE g_self = nullptr;
@@ -60,6 +61,7 @@ DWORD WINAPI InitThread(LPVOID) {
     loot::Register();
     respawn::Register();
     attribution::Register();
+    steamp2p::Register();
 
     // console port: base 27100 (+0.. depending on free)
     int basePort = 27100;
@@ -80,6 +82,7 @@ DWORD WINAPI InitThread(LPVOID) {
     loot::OnInit();
     respawn::OnInit();
     attribution::OnInit();
+    steamp2p::OnInit();
     g_initialized = true;
     LOGF("init complete");
     return 0;

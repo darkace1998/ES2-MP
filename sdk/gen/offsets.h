@@ -411,6 +411,12 @@ namespace es2off {
     constexpr uint32_t bUseWorldOriginShifting = 0x214; // bool (size 1) from UESGameInstance
     constexpr uint32_t WorldOriginShiftingStack = 0x1150; // int (size 4) from UESGameInstance
   }
+  namespace FOnlineSubsystemSteam {
+    constexpr uint32_t __size = 624;
+    constexpr uint32_t bSteamworksClientInitialized = 0xD8; // bool (size 1) from FOnlineSubsystemSteam
+    constexpr uint32_t SessionInterface = 0xF8; // TSharedPtr<FOnlineSessionSteam,1> (size 16) from FOnlineSubsystemSteam
+    constexpr uint32_t IdentityInterface = 0x108; // TSharedPtr<FOnlineIdentitySteam,1> (size 16) from FOnlineSubsystemSteam
+  }
   namespace UPlayerData {
     constexpr uint32_t __size = 8624;
     constexpr uint32_t Ships = 0x468; // TArray<FShipData,TSizedDefaultAllocator<32> > (size 16) from UPlayerData

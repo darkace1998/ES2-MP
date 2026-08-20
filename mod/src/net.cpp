@@ -6,6 +6,7 @@
 #include "coop.h"
 #include "loadout.h"
 #include "travel.h"
+#include "steamp2p.h"
 #include "players.h"
 #include <windows.h>
 #include <cstdlib>
@@ -188,12 +189,15 @@ static bool ApplyNetDriverMode(const std::string& mode, std::string& out) {
         Def& d = defs.Data[i];
         if (d.DefName == game) {
             d.DriverClassName = (mode == "steam") ? steam : ip;
-            d.DriverClassNameFallback = ip;
+            // Leaving the fallback on IpNetDriver makes a Steam failure silent: UE quietly creates an
+            // IpNetDriver and nothing says why. Point the fallback at the same class so a failure is visible.
+            d.DriverClassNameFallback = (mode == "steam") ? steam : ip;
             found = true;
         }
         out += Format("  netdriverdef %s -> %s (fallback %s)\n", d.DefName.ToString().c_str(), d.DriverClassName.ToString().c_str(), d.DriverClassNameFallback.ToString().c_str());
     }
     if (found) g_netDriverMode = mode;
+    steamp2p::SetHosting(g_netDriverMode == "steam");
     return found;
 }
 static void CmdNetDriver(const console::Args& a, std::string& out) {
