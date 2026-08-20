@@ -463,6 +463,16 @@ namespace es2off {
     constexpr uint32_t NameSeed = 0x44; // int (size 4) from UItem
     constexpr uint32_t ItemLevel = 0x58; // int (size 4) from UItem
     constexpr uint32_t Rarity = 0x60; // TEnumAsByte<enum EItemRarity::Type> (size 1) from UItem
+    constexpr uint32_t Amount = 0x19C; // int (size 4) from UItem
+  }
+  namespace APickupBase {
+    constexpr uint32_t __size = 976;
+    constexpr uint32_t PickupEntry = 0x378; // FPickupEntry (size 24) from APickupBase
+  }
+  namespace FPickupEntry {
+    constexpr uint32_t __size = 24;
+    constexpr uint32_t PickupClassPath = 0x0; // FString (size 16) from FPickupEntry
+    constexpr uint32_t PickupInventory = 0x10; // UInventory * (size 8) from FPickupEntry
   }
   namespace FWeaponInfo {
     constexpr uint32_t __size = 80;

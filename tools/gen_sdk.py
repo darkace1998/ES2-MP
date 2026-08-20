@@ -91,6 +91,11 @@ RVAS = {
     'AActor_GetVelocity': 'public: virtual struct UE::Math::TVector<double> __cdecl AActor::GetVelocity(void) const',
     'AActor_TeleportTo': 'public: virtual bool __cdecl AActor::TeleportTo(struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, bool, bool)',
     'UEngine_GetGameUserSettings': 'public: class UGameUserSettings * __cdecl UEngine::GetGameUserSettings(void)',
+    # ---- loot ----
+    'UGameplayLib_SpawnPickupFromItem': 'public: static class APickupBase * __cdecl UGameplayLib::SpawnPickupFromItem(class UObject *, class UItem *, struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, bool &)',
+    'UGameplayLib_SpawnPickupFromItemID': 'public: static class APickupBase * __cdecl UGameplayLib::SpawnPickupFromItemID(class UObject *, class FName, struct UE::Math::TVector<double> const &, int, struct UE::Math::TRotator<double> const &, bool &)',
+    'UGameplayLib_SpawnPickups': 'public: static bool __cdecl UGameplayLib::SpawnPickups(class UObject *, class TArray<struct FPickupEntry, class TSizedDefaultAllocator<32>> const &, struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, class TArray<class APickupBase *, class TSizedDefaultAllocator<32>> &)',
+    'UInventory_GetFirstCargoItem': 'public: class UItem * __cdecl UInventory::GetFirstCargoItem(void)',
     # ---- missions / dialog / xp ----
     'UMissionLib_UpdateTaskInPlayerData': 'public: static void __cdecl UMissionLib::UpdateTaskInPlayerData(class AMissionTaskBase *, bool, bool)',
     'UMissionLib_FindTaskInPlayerData': 'public: static struct FTaskSaveGameData * __cdecl UMissionLib::FindTaskInPlayerData(class FName)',
@@ -200,7 +205,9 @@ OFFSETS = {
     'UXPComponent': ['XP', 'NeededPlayerDamageRatio'],
     'UGameData': ['Locations'],
     'FLocationData': ['Name', 'LocationID', 'SystemID', 'MapAssetString', 'bNeverShowIngame'],
-    'UItem': ['ItemTemplateID', 'Seed', 'NameSeed', 'ItemLevel', 'Rarity'],
+    'UItem': ['ItemTemplateID', 'Seed', 'NameSeed', 'ItemLevel', 'Rarity', 'Amount'],
+    'APickupBase': ['PickupEntry'],
+    'FPickupEntry': ['PickupClassPath', 'PickupInventory'],
     'FWeaponInfo': ['WeaponItem', 'WeaponClass', 'SpawnedWeapons'],
     'UWeaponComponent': ['WeaponSlots'],
     'FShipData': ['Name', 'Inventory', 'ShipItemInstance', 'UltimateDevice'],

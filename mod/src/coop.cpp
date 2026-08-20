@@ -14,6 +14,7 @@
 #include "loadout.h"
 #include "travel.h"
 #include "world_state.h"
+#include "loot.h"
 #include <windows.h>
 #include <cmath>
 #include <cstring>
@@ -274,6 +275,7 @@ bool OnClientMessage(APlayerController* toPC, const std::string& raw) {
     if (loadout::OnClientOp(op, body)) return true;
     if (travel::OnClientOp(op, body)) return true;
     if (world_state::OnClientOp(op, body)) return true;
+    if (loot::OnClientOp(op, body)) return true;
     LOGF("[coop] unhandled host op '%s'", op.c_str());
     return true;
 }

@@ -82,6 +82,10 @@ namespace es2rva {
   constexpr uint32_t AActor_GetVelocity = 0x11F2A78; // public: virtual struct UE::Math::TVector<double> __cdecl AActor::GetVelocity(void) const
   constexpr uint32_t AActor_TeleportTo = 0x16AA728; // public: virtual bool __cdecl AActor::TeleportTo(struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, bool, bool)
   constexpr uint32_t UEngine_GetGameUserSettings = 0x137F928; // public: class UGameUserSettings * __cdecl UEngine::GetGameUserSettings(void)
+  constexpr uint32_t UGameplayLib_SpawnPickupFromItem = 0x5E3EC44; // public: static class APickupBase * __cdecl UGameplayLib::SpawnPickupFromItem(class UObject *, class UItem *, struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, bool &)
+  constexpr uint32_t UGameplayLib_SpawnPickupFromItemID = 0x5E3EDB0; // public: static class APickupBase * __cdecl UGameplayLib::SpawnPickupFromItemID(class UObject *, class FName, struct UE::Math::TVector<double> const &, int, struct UE::Math::TRotator<double> const &, bool &)
+  constexpr uint32_t UGameplayLib_SpawnPickups = 0x15036D8; // public: static bool __cdecl UGameplayLib::SpawnPickups(class UObject *, class TArray<struct FPickupEntry, class TSizedDefaultAllocator<32>> const &, struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, class TArray<class APickupBase *, class TSizedDefaultAllocator<32>> &)
+  constexpr uint32_t UInventory_GetFirstCargoItem = 0x153F744; // public: class UItem * __cdecl UInventory::GetFirstCargoItem(void)
   constexpr uint32_t UMissionLib_UpdateTaskInPlayerData = 0x15124A0; // public: static void __cdecl UMissionLib::UpdateTaskInPlayerData(class AMissionTaskBase *, bool, bool)
   constexpr uint32_t UMissionLib_FindTaskInPlayerData = 0x1312104; // public: static struct FTaskSaveGameData * __cdecl UMissionLib::FindTaskInPlayerData(class FName)
   constexpr uint32_t UMapLib_RefreshMissionAndWaypointIndicators = 0x16C9C58; // public: static void __cdecl UMapLib::RefreshMissionAndWaypointIndicators(void)

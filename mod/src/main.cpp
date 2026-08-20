@@ -14,6 +14,7 @@ namespace net { void Register(); void OnInit(); }
 #include "loadout.h"
 #include "travel.h"
 #include "world_state.h"
+#include "loot.h"
 
 namespace {
 HMODULE g_self = nullptr;
@@ -54,6 +55,7 @@ DWORD WINAPI InitThread(LPVOID) {
     loadout::Register();
     travel::Register();
     world_state::Register();
+    loot::Register();
 
     // console port: base 27100 (+0.. depending on free)
     int basePort = 27100;
@@ -71,6 +73,7 @@ DWORD WINAPI InitThread(LPVOID) {
     loadout::OnInit();
     travel::OnInit();
     world_state::OnInit();
+    loot::OnInit();
     g_initialized = true;
     LOGF("init complete");
     return 0;
