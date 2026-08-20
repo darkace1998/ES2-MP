@@ -36,6 +36,24 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
 | Capacity | `maxplayers` (GameSession default 16; ES2 has no cap of its own) |
 
 ### Hard-won gotchas (each cost a crash or a silent failure)
+- **Never aim a networked shot at a world point.** A client's copy of a moving NPC trails the host's by
+  the network latency — measured 574-3100 uu at ~10000 uu/s, many ship-lengths. Firing along a ray to
+  where the CLIENT saw the ship misses on the host every time, which is exactly why a client could kill a
+  stationary turret but never a moving ship. When the host knows which actor the player is on (synced
+  auto-aim / lock target) it aims at where IT has that actor; the reported point is only the fallback for
+  empty space.
+- **A client regenerates its own shield.** `UShieldComponent::TickRegeneration` has no authority check, so
+  local regen races the host's authoritative value and the bar visibly saws. Blocked on clients — the host
+  is the only thing that should move hitpoints there. Verified tracking: host 0.306/0.355/0.400/0.454,
+  client 0.300/0.355/0.393/0.433, monotonic, no oscillation.
+- **Mod traffic on the reliable channel starves actor replication.** Streaming aim at 20 Hz plus six NPC
+  aims at 10 Hz measurably worsened NPC position error: mean 1016 uu with it on versus 660 uu with it off.
+  Aim is now 20 Hz only while the trigger is down, 4 Hz idle, and NPC aim 6 Hz / 4 per tick — mean error
+  574 uu. Budget this channel: it also carries loadouts, world state and travel.
+- **A force-lock at 185 km is not a sync bug.** The `lock` console command locks the nearest target at any
+  distance; ES2 on the host then correctly drops an out-of-range lock. The verify check gates on the
+  target being within 10000 uu before asserting.
+
 - **A client's shots had no aim on the host — literally NaN.** The host pulls a client's trigger, but the
   client's server-side `UWeaponComponent` has no player behind it: `SmoothedAutoaim` takes its inputs from
   a controller with no camera or crosshair and writes `FocusLocation` (+0x888) as `(nan, nan, nan)`.

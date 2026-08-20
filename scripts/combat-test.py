@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Repeatable host-authority combat test.
 
+Add --ship to shoot a moving enemy rather than a turret.
+
 Teleports ONLY the client next to an enemy, has the client hold the trigger, and measures the
 enemy's health on the HOST. The host player is left alone (and made invulnerable) so nothing but
 the client's routed fire can explain a change.
@@ -94,7 +96,12 @@ def main():
     others = [a for a in host_actors if 'Outlaw' in a['cls'] and 'Turret' not in a['cls']]
     def isolated(t):
         return all(sum((a - b) ** 2 for a, b in zip(t['loc'], o['loc'])) > 400e6 for o in others)   # >20 km away
-    cands = [t for t in turrets if isolated(t)] or turrets or others
+    # --ship targets a MOVING enemy instead of a turret: a client could always kill a stationary
+    # turret, and only moving ships exposed the aim-at-a-stale-world-point bug.
+    if '--ship' in sys.argv:
+        cands = [a for a in others if 'Turret' not in a['cls']]
+    else:
+        cands = [t for t in turrets if isolated(t)] or turrets or others
     if not cands: print('no enemies in this location'); return 1
     tgt = cands[0]
     print(f'target: {tgt["name"]} at {tgt["loc"]}')

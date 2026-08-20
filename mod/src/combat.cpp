@@ -41,6 +41,8 @@ static double g_healthAccum = 0;
 // check), so the client refills its own shield between updates. Mirror fast enough that the
 // authoritative value wins instead of the bar jittering against local regen.
 static float g_healthHz = 10.f;
+// Set by the local fire routing: aim only needs to be exact while the trigger is actually down.
+static bool g_firingNow = false;
 
 // ---------------------------------------------------------------- helpers
 static APlayerController* LocalPC() { return GetFirstLocalPlayerController(GetWorld()); }
@@ -104,6 +106,7 @@ static void ApplyFireOnHost(APlayerController* pc, int which, bool down) {
 }
 
 static void SendFire(int which, bool down) {
+    g_firingNow = down;
     if (!g_routeFire) return;
     coop::SendToServer(Format("F|%d|%d", which, down ? 1 : 0));
     ++g_fireSent;
@@ -165,12 +168,26 @@ static std::map<UObject*, uint64_t> g_npcAutoAim;
 static bool g_autoAimSync = true;
 static uint64_t g_autoAimApplied = 0;
 static double g_npcAimAccum = 0;
-static float g_npcAimHz = 10.f;
+static float g_npcAimHz = 6.f;
 static bool g_npcAimSync = true;
-static bool g_lockSync = true;      // mirror the locked target as well as the aim point
+static bool g_lockSync = true;
+// A client regenerates its own shield locally (UShieldComponent::TickRegeneration has no authority
+// check), while the host streams the authoritative value. The two fight and the bar visibly saws up and
+// down. On a client the host is the only thing that should move hitpoints, so the local regen is off.
+using Fn_TickRegen = void (*)(UObject* comp, AActor* a, UObject* core, float f1, float f2, float f3);
+static Fn_TickRegen o_TickRegen = nullptr;
+static bool g_blockClientRegen = true;
+static uint64_t g_regenBlocked = 0;
+static void H_TickRegeneration(UObject* comp, AActor* a, UObject* core, float f1, float f2, float f3) {
+    if (g_blockClientRegen && coop::CurrentRole() == coop::Role::Client) { ++g_regenBlocked; return; }
+    o_TickRegen(comp, a, core, f1, f2, f3);
+}
+
+static bool g_aimAtTarget = true;   // host: aim at its own copy of the target, not the client's point
+static uint64_t g_aimRetargeted = 0;      // mirror the locked target as well as the aim point
 static size_t g_npcAimCursor = 0;            // round-robin so a big fight cannot flood one tick
 static uint64_t g_npcAimSent = 0, g_npcAimApplied = 0;
-static constexpr size_t kNpcAimPerTick = 6;
+static constexpr size_t kNpcAimPerTick = 4;
 
 
 static void* LocalGuidCache() {
@@ -382,7 +399,8 @@ using Fn_TickComponent = void (*)(UObject* comp, float dt, int tickType, void* t
 static Fn_TickComponent o_WeaponTick = nullptr;
 static std::map<int, FVector> g_aim;        // host: playerId -> the aim point that player reports
 static double g_aimAccum = 0;
-static float g_aimHz = 20.f;
+static float g_aimHz = 20.f;      // while firing
+static float g_aimIdleHz = 4.f;   // otherwise: enough to orient weapons, far less channel pressure
 static bool g_aimSync = true;
 static uint64_t g_aimSent = 0, g_aimApplied = 0;
 
@@ -460,7 +478,10 @@ static void HostNpcAimTick(float dt) {
 void ClientAimTick(float dt) {
     if (!g_aimSync || coop::CurrentRole() != coop::Role::Client) return;
     g_aimAccum += dt;
-    if (g_aimAccum < 1.0 / g_aimHz) return;
+    // Streaming 20 Hz constantly measurably starved actor replication: mean NPC position error between
+    // host and client was 1016 uu with the aim streams on versus 660 uu with them off. Aim only has to
+    // be exact while actually shooting.
+    if (g_aimAccum < 1.0 / (g_firingNow ? g_aimHz : g_aimIdleHz)) return;
     g_aimAccum = 0;
     APlayerController* pc = LocalPC();
     AActor* pawn = pc ? UE_FIELD(AActor*, pc, es2off::AController::Pawn) : nullptr;
@@ -511,8 +532,30 @@ static void H_WeaponTick(UObject* comp, float dt, int tickType, void* tickFn) {
             if (players::Player* p = players::ByPawn(owner)) {
                 auto it = g_aim.find(p->id);
                 if (it != g_aim.end() && !p->local) {
-                    UE_FIELD(FVector, comp, es2off::UWeaponComponent::FocusLocation) = it->second;
-                    UE_FIELD(FVector, comp, es2off::UWeaponComponent::ClampedNonAutoAimedFocusLocation) = it->second;
+                    int cat0 = (int)UE_FIELD(uint8_t, comp, es2off::UWeaponComponent::WeaponCategory);
+                    // Aim at the TARGET, not at the world point the client reported.
+                    //
+                    // A client's copy of a moving NPC trails the host's by roughly the network latency —
+                    // measured 660-1000 uu at ~10000 uu/s, which is many ship-lengths. Firing along a
+                    // ray to where the CLIENT saw the ship therefore misses on the host every time, and
+                    // that is exactly why a client could kill a stationary turret but never a moving one.
+                    // When we know which actor the player is on, aim at where the HOST has it instead;
+                    // the reported point is only the fallback for aiming at empty space.
+                    FVector focus = it->second;
+                    if (g_aimAtTarget && cat0 >= 0 && cat0 <= 1) {
+                        uint64_t tg = 0;
+                        auto aa2 = g_playerAutoAim.find(p->id);
+                        if (aa2 != g_playerAutoAim.end()) tg = aa2->second[cat0];
+                        if (!tg) { auto lk2 = g_playerLock.find(p->id); if (lk2 != g_playerLock.end()) tg = lk2->second[cat0]; }
+                        if (tg) {
+                            if (AActor* t = ActorFromNetGuid(tg)) {
+                                focus = GetActorTransform(t).Translation;
+                                ++g_aimRetargeted;
+                            }
+                        }
+                    }
+                    UE_FIELD(FVector, comp, es2off::UWeaponComponent::FocusLocation) = focus;
+                    UE_FIELD(FVector, comp, es2off::UWeaponComponent::ClampedNonAutoAimedFocusLocation) = focus;
                     ++g_aimApplied;
                     int cat = (int)UE_FIELD(uint8_t, comp, es2off::UWeaponComponent::WeaponCategory);
                     auto aa = g_playerAutoAim.find(p->id);
@@ -637,6 +680,26 @@ static void CmdInput(const console::Args& a, std::string& out) {
 // it between host and client is the direct measure of whether a client's shots go where it aims.
 // guid <n> — resolve a NetGUID back to an actor on THIS machine. The reverse lookup is the half of
 // FNetGUIDCache a server does not normally need, so this checks whether it works host-side at all.
+// npcpos — every replicated NPC pawn with its NetGUID and position, so the same ship can be compared
+// between host and client (their UObject names differ, the guid does not).
+static void CmdNpcPos(const console::Args& a, std::string& out) {
+    UClass* pawnClass = FindClass("ESPawn");
+    if (!pawnClass) { out = "no ESPawn class\n"; return; }
+    int shown = 0, max = a.size() > 1 ? atoi(a[1].c_str()) : 10;
+    for (AActor* act : GetAllActorsOfClass(GetWorld(), pawnClass)) {
+        if (shown >= max || !act || !IsValidObject((UObject*)act)) continue;
+        if (players::ByPawn(act)) continue;
+        uint64_t g = NetGuidOf((const UObject*)act);
+        if (!g) continue;
+        FTransform t = GetActorTransform(act);
+        out += Format("  guid=%-6llu %-28s pos=(%.0f, %.0f, %.0f) role=%d\n", (unsigned long long)g,
+                      GetName((UObject*)act).c_str(), t.Translation.X, t.Translation.Y, t.Translation.Z,
+                      (int)GetRole(act));
+        ++shown;
+    }
+    if (!shown) out += "  (no replicated NPC pawns)\n";
+}
+
 static void CmdGuid(const console::Args& a, std::string& out) {
     if (a.size() < 2) { out = "usage: guid <netguid>\n"; return; }
     uint64_t g = strtoull(a[1].c_str(), nullptr, 10);
@@ -717,9 +780,11 @@ static void CmdAimInfo(const console::Args& a, std::string& out) {
             if (!guid) return true;
             // '*' marks a component whose aim we are receiving from the host, i.e. an actually
             // mirrored shooter — those are the entries worth comparing between the two machines.
-            out += Format("  %sguid=%-8llu %-28s focus=(%.0f, %.0f, %.0f)\n",
+            FTransform ot = GetActorTransform(owner);
+            out += Format("  %sguid=%-6llu %-26s pos=(%.0f, %.0f, %.0f) focus=(%.0f, %.0f, %.0f)\n",
                           g_npcAim.count(o) ? "*" : " ", (unsigned long long)guid,
-                          GetName((UObject*)owner).c_str(), f.X, f.Y, f.Z);
+                          GetName((UObject*)owner).c_str(),
+                          ot.Translation.X, ot.Translation.Y, ot.Translation.Z, f.X, f.Y, f.Z);
             ++shown;
             return true;
         });
@@ -730,6 +795,8 @@ static void CmdAimInfo(const console::Args& a, std::string& out) {
 static void CmdCombat(const console::Args& a, std::string& out) {
     if (a.size() > 2 && a[1] == "route") g_routeFire = a[2] == "1";
     if (a.size() > 2 && a[1] == "localfire") g_localFire = a[2] == "1";
+    if (a.size() > 2 && a[1] == "clientregen") { g_blockClientRegen = a[2] == "0"; out += Format("client regen blocked %d\n", (int)g_blockClientRegen); return; }
+    if (a.size() > 2 && a[1] == "aimattarget") { g_aimAtTarget = a[2] == "1"; out += Format("aim-at-target %d\n", (int)g_aimAtTarget); return; }
     if (a.size() > 2 && a[1] == "autoaim") { g_autoAimSync = a[2] == "1"; out += Format("autoaim sync %d\n", (int)g_autoAimSync); return; }
     if (a.size() > 2 && a[1] == "locksync") { g_lockSync = a[2] == "1"; out += Format("lock sync %d\n", (int)g_lockSync); return; }
     if (a.size() > 2 && a[1] == "npcaim") { g_npcAimSync = a[2] == "1"; out += Format("npc aim sync %d\n", (int)g_npcAimSync); return; }
@@ -744,6 +811,8 @@ static void CmdCombat(const console::Args& a, std::string& out) {
                   (unsigned long long)g_lockApplied, (unsigned long long)g_guidScans);
     out += Format("npcAimSync=%d npcAimSent=%llu npcAimApplied=%llu npcAimTracked=%d\n",
                   (int)g_npcAimSync, (unsigned long long)g_npcAimSent, (unsigned long long)g_npcAimApplied, (int)g_npcAim.size());
+    out += Format("blockClientRegen=%d regenBlocked=%llu\n", (int)g_blockClientRegen, (unsigned long long)g_regenBlocked);
+    out += Format("aimAtTarget=%d retargeted=%llu\n", (int)g_aimAtTarget, (unsigned long long)g_aimRetargeted);
     out += Format("aimSync=%d aimSent=%llu aimApplied=%llu aimKnown=%d\n",
                   (int)g_aimSync, (unsigned long long)g_aimSent, (unsigned long long)g_aimApplied, (int)g_aim.size());
     out += Format("routeFire=%d localFire=%d healthHz=%.0f fireSent=%llu fireApplied=%llu\n",
@@ -838,6 +907,7 @@ void Register() {
     console::Register("input", "input <nextprimary|prevprimary|nextsecondary|travel on/off|cruise on/off> - press a real input handler (test aid)", CmdInput);
     console::Register("combat", "combat [route 0/1|localfire 0/1|hphz N] - fire-routing status and player health", CmdCombat);
     console::Register("locktest", "locktest <playerId> <targetGuid> - set+read a lock in one call", CmdLockTest);
+    console::Register("npcpos", "npcpos [max] - NPC pawn positions keyed by NetGUID", CmdNpcPos);
     console::Register("guid", "guid <n> - resolve a NetGUID to an actor on this machine", CmdGuid);
     console::Register("aiminfo", "aiminfo [npc] - weapon FocusLocation per player, or per NPC keyed by NetGUID", CmdAimInfo);
     console::Register("hp", "hp [Class] - health/shield ratios of pawns in the world", CmdHp);
@@ -854,6 +924,7 @@ void OnInit() {
     { void* orig = nullptr;
       hooks::Install("UGameplayLib::ApplyESRadialDamage", es2rva::UGameplayLib_ApplyESRadialDamage, (void*)&H_ApplyESRadialDamage, &orig);
       hooks::Enable("UGameplayLib::ApplyESRadialDamage", false); }
+    hooks::Install("UShieldComponent::TickRegeneration", es2rva::UShieldComponent_TickRegeneration, (void*)&H_TickRegeneration, (void**)&o_TickRegen);
     hooks::Install("UWeaponComponent::TickComponent", es2rva::UWeaponComponent_TickComponent, (void*)&H_WeaponTick, (void**)&o_WeaponTick);
     hooks::Install("UWeaponComponent::StartFire", es2rva::UWeaponComponent_StartFire, (void*)&H_StartFire, (void**)&o_StartFire);
     hooks::Install("UWeaponComponent::StopFire", es2rva::UWeaponComponent_StopFire, (void*)&H_StopFire, (void**)&o_StopFire);

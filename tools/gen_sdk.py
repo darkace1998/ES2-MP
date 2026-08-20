@@ -114,6 +114,7 @@ RVAS = {
     'FNetGUIDCache_GetObjectFromNetGUID': 'public: class UObject * __cdecl FNetGUIDCache::GetObjectFromNetGUID(class FNetworkGUID const &, bool)',
     'UWeaponComponent_GetLockedTarget': 'public: class AActor * __cdecl UWeaponComponent::GetLockedTarget(void) const',
     'UWeaponComponent_SetLockedTarget': 'public: void __cdecl UWeaponComponent::SetLockedTarget(class AActor *)',
+    'UShieldComponent_TickRegeneration': 'public: void __cdecl UShieldComponent::TickRegeneration(class AActor *, class UEnergyCoreComponent *, float, float, float)',
     'UWeaponComponent_TickComponent': 'public: virtual void __cdecl UWeaponComponent::TickComponent(float, enum ELevelTick, struct FActorComponentTickFunction *)',
     'UWeaponComponent_StartFire': 'public: void __cdecl UWeaponComponent::StartFire(void)',
     'UWeaponComponent_StopFire': 'public: void __cdecl UWeaponComponent::StopFire(void)',
