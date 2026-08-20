@@ -74,6 +74,46 @@ def main():
                 fired = (not before) and during and (not after)
     check('client fire drives the host-side weapon', fired)
 
+    # --- shared world state ---
+    ws_h, ws_c = con(HOST, 'world'), con(CLIENT, 'world')
+    check('mission/dialog sync enabled on both sides', 'missions=1' in ws_h and 'missions=1' in ws_c)
+
+    # drive a real mission change on the host and watch the client's own PlayerData record follow
+    tasks = con(HOST, 'missions')
+    m = re.search(r'^\s+(\S+)\s+state=\d+\s+stage=\d+\s+progress=(\d+)', tasks, re.M)
+    mission_ok = False
+    if m:
+        tid = m.group(1)
+        acts = con(HOST, 'actors MissionTaskBase 20')
+        addr = None
+        for line in acts.split('\n'):
+            mm = re.match(r'([0-9A-F]{8,16})\s', line)
+            if mm and tid in con(HOST, f'props 0x{mm.group(1)} MissionTaskID'):
+                addr = mm.group(1); break
+        if addr:
+            want = 3 + (int(m.group(2)) % 5)
+            con(HOST, f'call 0x{addr} SetProgress {want}')
+            time.sleep(2)
+            rec = con(CLIENT, f'missions {tid}')
+            mission_ok = f'progress={want}' in rec
+            check('mission progress reaches the client\'s own PlayerData', mission_ok, f'{tid} -> progress={want}')
+    if not mission_ok and not m:
+        check('mission progress reaches the client\'s own PlayerData', False, 'no mission task found to drive')
+
+    # loot: host drops one, the client should materialise its own copy
+    before = con(CLIENT, 'loot')
+    con(HOST, 'loot test coil_gun 12')
+    time.sleep(4)
+    after = con(CLIENT, 'loot')
+    def applied(t):
+        mm = re.search(r'applied=(\d+)', t); return int(mm.group(1)) if mm else -1
+    check('loot drop mirrored to the client', applied(after) > applied(before), f'{applied(before)} -> {applied(after)}')
+
+    rs = con(HOST, 'respawn')
+    check('co-op death handling armed', 'respawn=1' in rs and 'vetoGameOverPawn=1' in rs, rs.strip().split('\n')[0][:90])
+    at = con(HOST, 'attribution')
+    check('kill attribution armed', 'attribution=1' in at)
+
     mp = con(HOST, 'maxplayers')
     m = re.search(r'MaxPlayers=(\d+)', mp)
     check('host capacity >= 4 players', bool(m and int(m.group(1)) >= 4), mp.strip())

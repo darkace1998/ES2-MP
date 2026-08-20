@@ -36,15 +36,22 @@ using Fn_RefreshIndicators      = void (*)();
 using Fn_EnqueueDialogMember    = bool (*)(void* self, FName dialogId, const void* finishedDelegate, float delay, int type, int behavior, bool playOnce);
 using Fn_EnqueueDialogStatic    = void (*)(bool* outOk, FName dialogId, float delay, int type, int behavior, bool playOnce);
 using Fn_AddXP                  = bool (*)(float xp, bool a, bool b, float c);
-using Fn_OwnerHealthDepleted    = void (*)(void* self, AActor* a, AActor* b, void* controller);
+using Fn_OnMissionCompleted     = void (*)(void* playerData, void* mission);
+using Fn_ChangeTrackedMission   = void (*)(FName missionId, bool track);
+using Fn_GetPlayerData          = UObject* (*)();
+using Fn_DialogGetSingleton     = UObject* (*)(bool bMenu);
 
 static Fn_UpdateTaskInPlayerData o_UpdateTask = nullptr;
 static Fn_EnqueueDialogMember    o_EnqueueDialog = nullptr;
-static Fn_OwnerHealthDepleted    o_OwnerHealthDepleted = nullptr;
+static Fn_OnMissionCompleted     o_OnMissionCompleted = nullptr;
+static Fn_ChangeTrackedMission   o_ChangeTrackedMission = nullptr;
 
 // ---------------------------------------------------------------- state
-struct TaskSnapshot { int state = -1, stage = -1, progress = -1; std::string loc, station; };
-static std::map<std::string, TaskSnapshot> g_taskCache;     // host: last broadcast value per task id
+struct TaskSnapshot { int state = -1, stage = -1, progress = -1; uint64_t loc = 0, station = 0; std::string id, locStr, stationStr; };
+// Keyed by the FName's raw 64-bit value: this hook runs on the per-frame mission paths, so the hot path
+// must not build a std::string on every call.
+static std::map<uint64_t, TaskSnapshot> g_taskCache;
+static inline uint64_t NameKey(const FName& n) { return ((uint64_t)n.ComparisonIndex << 32) | n.Number; }
 
 static bool g_syncMissions = true;
 static bool g_syncDialog = true;
@@ -58,25 +65,31 @@ static double g_refreshAccum = 0;
 // ---------------------------------------------------------------- mission mirroring
 static void BroadcastTask(void* task) {
     if (!task) return;
-    std::string id = UE_FIELD(FName, task, es2off::AMissionTaskBase::MissionTaskID).ToString();
-    if (id.empty() || id == "None") return;
-    TaskSnapshot now;
-    now.state    = (int)UE_FIELD(uint8_t, task, es2off::AMissionTaskBase::TaskState);
-    now.stage    = UE_FIELD(int32_t, task, es2off::AMissionTaskBase::StageValue);
-    now.progress = UE_FIELD(int32_t, task, es2off::AMissionTaskBase::ProgressValue);
-    now.loc      = UE_FIELD(FName, task, es2off::AMissionTaskBase::LocationID).ToString();
-    now.station  = UE_FIELD(FName, task, es2off::AMissionTaskBase::StationID).ToString();
+    FName idName = UE_FIELD(FName, task, es2off::AMissionTaskBase::MissionTaskID);
+    if (idName.IsNone()) return;
+    uint64_t key = NameKey(idName);
+    int state    = (int)UE_FIELD(uint8_t, task, es2off::AMissionTaskBase::TaskState);
+    int stage    = UE_FIELD(int32_t, task, es2off::AMissionTaskBase::StageValue);
+    int progress = UE_FIELD(int32_t, task, es2off::AMissionTaskBase::ProgressValue);
+    uint64_t loc = NameKey(UE_FIELD(FName, task, es2off::AMissionTaskBase::LocationID));
+    uint64_t sta = NameKey(UE_FIELD(FName, task, es2off::AMissionTaskBase::StationID));
 
-    auto it = g_taskCache.find(id);
+    auto it = g_taskCache.find(key);
     if (it != g_taskCache.end()) {
         const TaskSnapshot& p = it->second;
-        if (p.state == now.state && p.stage == now.stage && p.progress == now.progress &&
-            p.loc == now.loc && p.station == now.station) return;      // nothing changed: stay quiet
+        if (p.state == state && p.stage == stage && p.progress == progress && p.loc == loc && p.station == sta)
+            return;                                    // nothing changed: no allocation, no message
     }
-    g_taskCache[id] = now;
+    // Something changed: only now is it worth resolving the names to strings.
+    TaskSnapshot now;
+    now.state = state; now.stage = stage; now.progress = progress; now.loc = loc; now.station = sta;
+    now.id = idName.ToString();
+    now.locStr = UE_FIELD(FName, task, es2off::AMissionTaskBase::LocationID).ToString();
+    now.stationStr = UE_FIELD(FName, task, es2off::AMissionTaskBase::StationID).ToString();
+    g_taskCache[key] = now;
     ++g_taskSent;
-    coop::SendToAllClients(Format("MT|%s|%d|%d|%d|%s|%s", id.c_str(), now.state, now.stage, now.progress,
-                                  now.loc.c_str(), now.station.c_str()));
+    coop::SendToAllClients(Format("MT|%s|%d|%d|%d|%s|%s", now.id.c_str(), state, stage, progress,
+                                  now.locStr.c_str(), now.stationStr.c_str()));
 }
 
 static void H_UpdateTaskInPlayerData(void* task, bool a, bool b) {
@@ -116,11 +129,57 @@ static bool ApplyTask(const std::string& body) {
     return true;
 }
 
+// UPlayerData::MissionSaveState deltas do not cover CompletedMissions, which is written only here.
+static void H_OnMissionCompleted(void* playerData, void* mission) {
+    o_OnMissionCompleted(playerData, mission);
+    if (!g_syncMissions || g_applying || coop::CurrentRole() != coop::Role::Host) return;
+    if (!mission || !IsValidObject((UObject*)mission)) return;
+    FName id = UE_FIELD(FName, mission, es2off::AMissionBase::MissionTaskID);
+    if (id.IsNone()) return;
+    coop::SendToAllClients("MC|" + id.ToString());
+}
+
+// ...nor the tracked-mission FNames, written only here. Replaying the same call on the client lets the
+// game decide which of TrackedMainMission / TrackedSideMission / TrackedJob to write.
+static void H_ChangeTrackedMission(FName missionId, bool track) {
+    o_ChangeTrackedMission(missionId, track);
+    if (!g_syncMissions || g_applying || coop::CurrentRole() != coop::Role::Host) return;
+    if (missionId.IsNone()) return;
+    coop::SendToAllClients(Format("TRK|%s|%d", missionId.ToString().c_str(), (int)track));
+}
+
+static bool ApplyMissionCompleted(const std::string& body) {
+    UObject* pd = Rva<std::remove_pointer_t<Fn_GetPlayerData>>(es2rva::UGameplayLib_GetPlayerData)();
+    if (!pd || body.empty()) return true;
+    FName id = FName::Make(body);
+    TArray<FName>& done = UE_FIELD(TArray<FName>, pd, es2off::UPlayerData::CompletedMissions);
+    for (int i = 0; i < done.Num; ++i) if (done[i] == id) return true;      // already recorded
+    g_applying = true;
+    done.Add(id);
+    g_applying = false;
+    g_indicatorsDirty = true;
+    LOGF("[world] mission '%s' recorded as completed locally (%d total)", body.c_str(), done.Num);
+    return true;
+}
+
+static bool ApplyTrackedMission(const std::string& body) {
+    char id[128] = {0}; int track = 1;
+    if (sscanf(body.c_str(), "%127[^|]|%d", id, &track) < 1) return true;
+    g_applying = true;
+    Rva<std::remove_pointer_t<Fn_ChangeTrackedMission>>(es2rva::ChangeTrackedMission_Internal)(
+        FName::Make(std::string(id)), track != 0);
+    g_applying = false;
+    g_indicatorsDirty = true;
+    return true;
+}
+
 // ---------------------------------------------------------------- dialog
 static bool H_EnqueueDialog(void* self, FName dialogId, const void* finishedDelegate, float delay,
                             int type, int behavior, bool playOnce) {
     bool r = o_EnqueueDialog(self, dialogId, finishedDelegate, delay, type, behavior, playOnce);
-    if (g_syncDialog && !g_applying && coop::CurrentRole() == coop::Role::Host && r) {
+    // Menu chatter goes through a SECOND UDialogManager singleton; only mirror the in-game one.
+    UObject* gameMgr = Rva<std::remove_pointer_t<Fn_DialogGetSingleton>>(es2rva::UDialogManager_GetSingleton_Bool)(false);
+    if (g_syncDialog && !g_applying && coop::CurrentRole() == coop::Role::Host && r && self == gameMgr) {
         std::string id = dialogId.ToString();
         if (!id.empty() && id != "None") {
             ++g_dlgSent;
@@ -144,15 +203,8 @@ static bool ApplyDialog(const std::string& body) {
 }
 
 // ---------------------------------------------------------------- kill XP
-static void H_OwnerHealthDepleted(void* self, AActor* a, AActor* b, void* controller) {
-    o_OwnerHealthDepleted(self, a, b, controller);
-    if (!g_syncXP || coop::CurrentRole() != coop::Role::Host) return;
-    float xp = self ? UE_FIELD(float, self, es2off::UXPComponent::XP) : 0.f;
-    if (xp > 0.f) {
-        ++g_xpSent;
-        coop::SendToAllClients(Format("XP|%.2f", xp));
-    }
-}
+// The award itself is owned by attribution.cpp: it scopes each kill to the player who caused it and
+// redirects UGameplayLib::AddXP to that player. All that remains here is applying an incoming award.
 
 static bool ApplyXP(const std::string& body) {
     float xp = (float)atof(body.c_str());
@@ -167,9 +219,9 @@ void OnPlayerJoined(APlayerController* pc) {
     if (!g_syncMissions || coop::CurrentRole() != coop::Role::Host || !pc) return;
     // Re-send every task we know about so a joiner is consistent, not just up to date from now on.
     int n = 0;
-    for (auto& [id, s] : g_taskCache) {
-        coop::SendToClient(pc, Format("MT|%s|%d|%d|%d|%s|%s", id.c_str(), s.state, s.stage, s.progress,
-                                      s.loc.c_str(), s.station.c_str()));
+    for (auto& [key, s] : g_taskCache) {
+        coop::SendToClient(pc, Format("MT|%s|%d|%d|%d|%s|%s", s.id.c_str(), s.state, s.stage, s.progress,
+                                      s.locStr.c_str(), s.stationStr.c_str()));
         ++n;
     }
     LOGF("[world] sent %d cached mission task(s) to joiner %s", n, GetName((UObject*)pc).c_str());
@@ -180,6 +232,8 @@ bool OnServerOp(APlayerController*, const std::string&, const std::string&) { re
 
 bool OnClientOp(const std::string& op, const std::string& body) {
     if (op == "MT")  return ApplyTask(body);
+    if (op == "MC")  return ApplyMissionCompleted(body);
+    if (op == "TRK") return ApplyTrackedMission(body);
     if (op == "DLG") return ApplyDialog(body);
     if (op == "XP")  return ApplyXP(body);
     return false;
@@ -207,9 +261,9 @@ static void CmdWorld(const console::Args& a, std::string& out) {
                   (unsigned long long)g_taskApplied, (unsigned long long)g_dlgApplied, g_xpApplied);
     out += Format("cached tasks: %d\n", (int)g_taskCache.size());
     int n = 0;
-    for (auto& [id, s] : g_taskCache) {
+    for (auto& [key, s] : g_taskCache) {
         if (n++ >= 20) { out += "  ...\n"; break; }
-        out += Format("  %-28s state=%d stage=%d progress=%d loc=%s\n", id.c_str(), s.state, s.stage, s.progress, s.loc.c_str());
+        out += Format("  %-28s state=%d stage=%d progress=%d loc=%s\n", s.id.c_str(), s.state, s.stage, s.progress, s.locStr.c_str());
     }
 }
 
@@ -251,7 +305,9 @@ void OnInit() {
                    (void*)&H_UpdateTaskInPlayerData, (void**)&o_UpdateTask);
     hooks::Install("UDialogManager::EnqueueDialog", es2rva::UDialogManager_EnqueueDialog_Member,
                    (void*)&H_EnqueueDialog, (void**)&o_EnqueueDialog);
-    hooks::Install("UXPComponent::OwnerHealthDepleted", es2rva::UXPComponent_OwnerHealthDepleted,
-                   (void*)&H_OwnerHealthDepleted, (void**)&o_OwnerHealthDepleted);
+    hooks::Install("UPlayerData::OnMissionCompleted", es2rva::UPlayerData_OnMissionCompleted,
+                   (void*)&H_OnMissionCompleted, (void**)&o_OnMissionCompleted);
+    hooks::Install("ChangeTrackedMission_Internal", es2rva::ChangeTrackedMission_Internal,
+                   (void*)&H_ChangeTrackedMission, (void**)&o_ChangeTrackedMission);
 }
 }

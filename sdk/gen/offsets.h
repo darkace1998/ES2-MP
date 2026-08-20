@@ -416,6 +416,10 @@ namespace es2off {
     constexpr uint32_t Ships = 0x468; // TArray<FShipData,TSizedDefaultAllocator<32> > (size 16) from UPlayerData
     constexpr uint32_t ShipsSaveState = 0x478; // TArray<FShipDataState,TSizedDefaultAllocator<32> > (size 16) from UPlayerData
     constexpr uint32_t CurrentShip = 0x119C; // int (size 4) from UPlayerData
+    constexpr uint32_t CompletedMissions = 0x1438; // TArray<FName,TSizedDefaultAllocator<32> > (size 16) from UPlayerData
+    constexpr uint32_t TrackedMainMission = 0x160C; // FName (size 8) from UPlayerData
+    constexpr uint32_t TrackedSideMission = 0x1614; // FName (size 8) from UPlayerData
+    constexpr uint32_t TrackedJob = 0x161C; // FName (size 8) from UPlayerData
   }
   namespace FTaskSaveGameData {
     constexpr uint32_t __size = 320;
@@ -427,6 +431,10 @@ namespace es2off {
     constexpr uint32_t StationID = 0x68; // FName (size 8) from FTaskSaveGameData
     constexpr uint32_t TimeStamp = 0x58; // float (size 4) from FTaskSaveGameData
     constexpr uint32_t bIsMission = 0x5C; // bool (size 1) from FTaskSaveGameData
+  }
+  namespace AMissionBase {
+    constexpr uint32_t __size = 1208;
+    constexpr uint32_t MissionTaskID = 0x2B0; // FName (size 8) from AMissionTaskBase
   }
   namespace AMissionTaskBase {
     constexpr uint32_t __size = 1008;

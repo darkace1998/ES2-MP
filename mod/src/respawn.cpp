@@ -26,6 +26,16 @@ namespace respawn {
 
 using Fn_UnPossess = void (*)(void* controller);
 using Fn_RestartPlayer = void (*)(void* gameMode, void* controller);
+using Fn_Possess = void (*)(void* controller, AActor* pawn);
+using Fn_PCVoid = void (*)(void* pc);
+using Fn_LoadGame = void (*)(const UObject* wco, const void* saveName, int userIndex);
+
+static Fn_Possess o_Possess = nullptr;
+static Fn_PCVoid o_ReturnToMainMenu = nullptr;
+static Fn_LoadGame o_LoadGame = nullptr;
+static uint64_t g_vetoed = 0, g_blockedExits = 0;
+static bool g_vetoGameOverPawn = true;
+static bool g_blockSessionExits = true;
 
 static bool g_enabled = true;
 static double g_delay = 5.0;
@@ -53,6 +63,61 @@ static bool IsFlying(AActor* pawn) {
     return true;
 }
 
+// Hard veto: never let a co-op player's controller possess anything that is not a ship. That is what
+// puts the player into BP_Pawn_GameOver_C and starts the single-player game-over flow.
+static void H_Possess(void* controller, AActor* pawn) {
+    if (g_enabled && g_vetoGameOverPawn && coop::CurrentRole() == coop::Role::Host && controller && pawn) {
+        players::Player* pl = players::ByController((APlayerController*)controller);
+        UClass* esPawn = FindClass("/Script/ES2.ESPawn");
+        if (pl && esPawn && !IsA((UObject*)pawn, esPawn)) {
+            ++g_vetoed;
+            LOGF("[respawn] vetoed possession of %s by player %d (not a ship) — respawning instead",
+                 GetName((UObject*)pawn).c_str(), pl->id);
+            g_state[pl->id].deadSince = g_now;
+            g_state[pl->id].pending = true;
+            return;                                   // do NOT call the original
+        }
+    }
+    o_Possess(controller, pawn);
+}
+
+// While a co-op session is live these two end it for everyone.
+static void H_ReturnToMainMenu(void* pc) {
+    if (g_blockSessionExits && coop::CurrentRole() != coop::Role::None) {
+        ++g_blockedExits;
+        LOGF("[respawn] blocked ReturnToMainMenu during a co-op session");
+        return;
+    }
+    o_ReturnToMainMenu(pc);
+}
+static void H_LoadGame(const UObject* wco, const void* saveName, int userIndex) {
+    if (g_blockSessionExits && coop::CurrentRole() != coop::Role::None) {
+        ++g_blockedExits;
+        LOGF("[respawn] blocked LoadGame during a co-op session (it would end it for everyone)");
+        return;
+    }
+    o_LoadGame(wco, saveName, userIndex);
+}
+
+// Restore hull/armour/shield through the engine's own setter so the HUD follows (it broadcasts
+// OnHealthChanged); writing HitpointRatio directly leaves the UI stale.
+static void RestoreHitpoints(AActor* pawn) {
+    if (!pawn) return;
+    for (const char* cls : {"HealthComponent", "ArmorComponent", "ShieldComponent"}) {
+        UClass* want = FindClass(cls);
+        if (!want) continue;
+        for (auto& p : GetProperties((UStruct*)GetClass((UObject*)pawn), true)) {
+            if (p.TypeName != "ObjectProperty") continue;
+            UObject* v = UE_FIELD(UObject*, pawn, p.Offset);
+            if (!v || !IsValidObject(v) || !IsA(v, want)) continue;
+            UFunction* fn = FindFunction(v, "SetCurrentHitpointsWithRatio");
+            if (fn) { float ratio = 1.f; ProcessEvent(v, fn, &ratio); }
+            else UE_FIELD(float, v, es2off::UHealthComponent::HitpointRatio) = 1.f;
+            break;
+        }
+    }
+}
+
 static void DoRespawn(players::Player* pl) {
     UWorld* w = GetWorld();
     AGameModeBase* gm = GetGameMode(w);
@@ -67,16 +132,7 @@ static void DoRespawn(players::Player* pl) {
             UFunction* destroy = FindFunction((UObject*)oldPawn, "K2_DestroyActor");
             if (destroy) ProcessEvent((UObject*)oldPawn, destroy, nullptr);
         }
-        // full hull/shield on respawn
-        UClass* hc = FindClass("HealthComponent");
-        UClass* sc = FindClass("ShieldComponent");
-        for (auto& p : GetProperties((UStruct*)GetClass((UObject*)newPawn), true)) {
-            if (p.TypeName != "ObjectProperty") continue;
-            UObject* v = UE_FIELD(UObject*, newPawn, p.Offset);
-            if (!v || !IsValidObject(v)) continue;
-            if ((hc && IsA(v, hc)) || (sc && IsA(v, sc)))
-                UE_FIELD(float, v, es2off::UHealthComponent::HitpointRatio) = 1.f;
-        }
+        RestoreHitpoints(newPawn);
         ++g_respawns;
         LOGF("[respawn] player %d is flying %s again", pl->id, GetName((UObject*)newPawn).c_str());
         if (!pl->local && pl->pc) coop::SendToClient(pl->pc, "RESPAWNED|1");
@@ -119,7 +175,12 @@ static void CmdRespawn(const console::Args& a, std::string& out) {
         players::Player* pl = players::ById(atoi(a[2].c_str()));
         if (pl) { DoRespawn(pl); out += "respawned\n"; } else out += "no such player\n";
     }
-    out += Format("respawn=%d delay=%.0fs respawns=%llu\n", (int)g_enabled, g_delay, (unsigned long long)g_respawns);
+    if (a.size() > 2 && a[1] == "veto") g_vetoGameOverPawn = a[2] == "1";
+    if (a.size() > 2 && a[1] == "blockexits") g_blockSessionExits = a[2] == "1";
+    out += Format("respawn=%d delay=%.0fs respawns=%llu vetoGameOverPawn=%d(%llu vetoed) blockSessionExits=%d(%llu blocked)\n",
+                  (int)g_enabled, g_delay, (unsigned long long)g_respawns,
+                  (int)g_vetoGameOverPawn, (unsigned long long)g_vetoed,
+                  (int)g_blockSessionExits, (unsigned long long)g_blockedExits);
     for (auto* pl : players::All())
         out += Format("  p%d %-22s flying=%d\n", pl->id, GetName((UObject*)pl->pawn).c_str(), (int)IsFlying(pl->pawn));
 }
@@ -127,5 +188,10 @@ static void CmdRespawn(const console::Args& a, std::string& out) {
 void Register() {
     console::Register("respawn", "respawn [on 0/1|off|delay N|now <playerId>] - co-op death handling", CmdRespawn);
 }
-void OnInit() {}
+void OnInit() {
+    hooks::Install("AController::Possess", es2rva::AController_Possess, (void*)&H_Possess, (void**)&o_Possess);
+    hooks::Install("AESPlayerController::ReturnToMainMenu", es2rva::AESPlayerController_ReturnToMainMenu,
+                   (void*)&H_ReturnToMainMenu, (void**)&o_ReturnToMainMenu);
+    hooks::Install("UUserFunctionsLib::LoadGame", es2rva::UUserFunctionsLib_LoadGame, (void*)&H_LoadGame, (void**)&o_LoadGame);
+}
 }

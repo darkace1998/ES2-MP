@@ -16,6 +16,7 @@ namespace net { void Register(); void OnInit(); }
 #include "world_state.h"
 #include "loot.h"
 #include "respawn.h"
+#include "attribution.h"
 
 namespace {
 HMODULE g_self = nullptr;
@@ -58,6 +59,7 @@ DWORD WINAPI InitThread(LPVOID) {
     world_state::Register();
     loot::Register();
     respawn::Register();
+    attribution::Register();
 
     // console port: base 27100 (+0.. depending on free)
     int basePort = 27100;
@@ -77,6 +79,7 @@ DWORD WINAPI InitThread(LPVOID) {
     world_state::OnInit();
     loot::OnInit();
     respawn::OnInit();
+    attribution::OnInit();
     g_initialized = true;
     LOGF("init complete");
     return 0;

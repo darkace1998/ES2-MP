@@ -464,3 +464,24 @@ The award is `UXPComponent::OwnerHealthDepleted(AActor*, AActor*, AController*)`
 - Whether UScriptStruct::ExportText/ImportText round-trip FTaskSaveGameData cleanly given its SerializedTask TArray<uint8> member. If the text form is unusable for that member, exclude it from the wire format and confirm the client's mission-log UI does not need it (GetCurrentObjectivesForMissionLog does not appear to read it).
 - Whether ULootDropComponent's kill-attribution (UFactionComponent::FactionEntries damage share) counts damage dealt by the client's server-side pawn as 'player damage'. This gates both loot drops and XP; it depends on the P4 damage-routing work and should be re-checked once client weapon fire reaches the host.
 - Whether the client's dialog subtitle UI works at all without AESGameModeBase::LogDialogSubtitle running. The subtitle display itself is driven by UDialogManager::ShowSubtitleLineCallback (0183EEF8) -> SubtitleLineStarted multicast (manager+0x210), which is independent of the gamemode, so subtitles should appear — but the client's UPlayerData::DialogLog (+0x19D8) will stay empty, meaning the in-game dialog history screen is blank for the joiner unless entries are mirrored.
+
+---
+
+## ⚠ VERIFICATION NOTE (2026-08-20)
+
+This document was adversarially verified afterwards — see `09-missions-loot-verification.md`.
+Verdict: **NEEDS_FIXES**. All ~90 RVAs and every struct offset re-derived correctly, but nine
+substantive errors were found, including:
+
+- **`UItem::GetItemState`'s ABI is documented backwards here** (it is a member function, so
+  RCX=this, RDX=sret). Following this document corrupts a live UItem.
+- `UMissionLib::AddNonItemRewards` does **not** grant faction standing and never reads OkkarCredits.
+- `DialogCounter` is a standalone process global, not `UPlayerData+0xB58` at runtime.
+- `UpdateTaskInPlayerData` is **not** the only writer of mission state
+  (`ADynamicJobManager::SetTaskVisible_Internal` writes records directly), and one of its call
+  sites fires **every frame**.
+- Two event sources this document tells you to mirror have no hook here: `CompletedMissions`
+  (written only by `UPlayerData::OnMissionCompleted`) and the Tracked* FNames
+  (written only by `ChangeTrackedMission_Internal`).
+
+The implementation in `mod/src/world_state.cpp` follows the *corrected* findings.

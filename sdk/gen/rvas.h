@@ -82,6 +82,12 @@ namespace es2rva {
   constexpr uint32_t AActor_GetVelocity = 0x11F2A78; // public: virtual struct UE::Math::TVector<double> __cdecl AActor::GetVelocity(void) const
   constexpr uint32_t AActor_TeleportTo = 0x16AA728; // public: virtual bool __cdecl AActor::TeleportTo(struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, bool, bool)
   constexpr uint32_t UEngine_GetGameUserSettings = 0x137F928; // public: class UGameUserSettings * __cdecl UEngine::GetGameUserSettings(void)
+  constexpr uint32_t AController_Possess = 0x16ACD68; // public: virtual void __cdecl AController::Possess(class APawn *)
+  constexpr uint32_t UHealthComponent_SetCurrentHitpointsWithRatio = 0x1556948; // public: virtual void __cdecl UHealthComponent::SetCurrentHitpointsWithRatio(float)
+  constexpr uint32_t UUserFunctionsLib_LoadGame = 0x5E89DD4; // public: static void __cdecl UUserFunctionsLib::LoadGame(class UObject const *, class FString, int)
+  constexpr uint32_t AESPlayerController_ReturnToMainMenu = 0x5E164FC; // public: void __cdecl AESPlayerController::ReturnToMainMenu(void)
+  constexpr uint32_t ChangeTrackedMission_Internal = 0x5E72444; // void __cdecl ChangeTrackedMission_Internal(class FName, bool)
+  constexpr uint32_t UPlayerData_OnMissionCompleted = 0x5E0FD6C; // public: void __cdecl UPlayerData::OnMissionCompleted(class AMissionBase *)
   constexpr uint32_t UGameplayLib_SpawnPickupFromItem = 0x5E3EC44; // public: static class APickupBase * __cdecl UGameplayLib::SpawnPickupFromItem(class UObject *, class UItem *, struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, bool &)
   constexpr uint32_t UGameplayLib_SpawnPickupFromItemID = 0x5E3EDB0; // public: static class APickupBase * __cdecl UGameplayLib::SpawnPickupFromItemID(class UObject *, class FName, struct UE::Math::TVector<double> const &, int, struct UE::Math::TRotator<double> const &, bool &)
   constexpr uint32_t UGameplayLib_SpawnPickups = 0x15036D8; // public: static bool __cdecl UGameplayLib::SpawnPickups(class UObject *, class TArray<struct FPickupEntry, class TSizedDefaultAllocator<32>> const &, struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, class TArray<class APickupBase *, class TSizedDefaultAllocator<32>> &)
@@ -91,7 +97,7 @@ namespace es2rva {
   constexpr uint32_t UMapLib_RefreshMissionAndWaypointIndicators = 0x16C9C58; // public: static void __cdecl UMapLib::RefreshMissionAndWaypointIndicators(void)
   constexpr uint32_t UDialogManager_EnqueueDialog_Member = 0x1841D10; // private: bool __cdecl UDialogManager::EnqueueDialog(class FName, class FDialogFinishedDelegate const *, float, enum EDialog::Type, enum EDialogBehavior::Type, bool)
   constexpr uint32_t UDialogManager_EnqueueDialog_Static = 0x1840F9C; // public: static void __cdecl UDialogManager::EnqueueDialog(bool &, class FName, float, enum EDialog::Type, enum EDialogBehavior::Type, bool)
-  constexpr uint32_t UDialogManager_GetSingleton = 0x184197C; // private: static class UDialogManager & __cdecl UDialogManager::GetSingleton(bool)
+  constexpr uint32_t UDialogManager_GetSingleton_Bool = 0x184197C; // private: static class UDialogManager & __cdecl UDialogManager::GetSingleton(bool)
   constexpr uint32_t UGameplayLib_AddXP = 0x5E209B8; // public: static bool __cdecl UGameplayLib::AddXP(float, bool, bool, float)
   constexpr uint32_t UGameplayLib_ChangeCredits = 0x5E21DF0; // public: static void __cdecl UGameplayLib::ChangeCredits(int, enum ECreditsTransferType::Type, bool, bool)
   constexpr uint32_t UXPComponent_OwnerHealthDepleted = 0x19423AC; // public: void __cdecl UXPComponent::OwnerHealthDepleted(class AActor *, class AActor *, class AController *)
@@ -130,7 +136,6 @@ namespace es2rva {
   constexpr uint32_t UScriptStruct_ImportText = 0x2D06F3C; // public: wchar_t const * __cdecl UScriptStruct::ImportText(wchar_t const *, void *, class UObject *, int, class FOutputDevice *, class FString const &, bool) const
   constexpr uint32_t UGameplayLib_RefreshPlayerShipData = 0x5E37DA4; // public: static void __cdecl UGameplayLib::RefreshPlayerShipData(void)
   constexpr uint32_t AController_UnPossess = 0x150A9F4; // public: virtual void __cdecl AController::UnPossess(void)
-  constexpr uint32_t AController_Possess = 0x16ACD68; // public: virtual void __cdecl AController::Possess(class APawn *)
   constexpr uint32_t AESHUD_Tick = 0x13F2384; // public: virtual void __cdecl AESHUD::Tick(float)
   constexpr uint32_t AESGameModeBase_GetESGameMode = 0x1505960; // public: static class AESGameModeBase * __cdecl AESGameModeBase::GetESGameMode(class UObject const *)
 }

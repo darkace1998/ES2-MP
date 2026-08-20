@@ -16,6 +16,7 @@
 #include "world_state.h"
 #include "loot.h"
 #include "respawn.h"
+#include "attribution.h"
 #include <windows.h>
 #include <cmath>
 #include <cstring>
