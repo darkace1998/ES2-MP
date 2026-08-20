@@ -82,6 +82,13 @@ namespace es2rva {
   constexpr uint32_t AActor_GetVelocity = 0x11F2A78; // public: virtual struct UE::Math::TVector<double> __cdecl AActor::GetVelocity(void) const
   constexpr uint32_t AActor_TeleportTo = 0x16AA728; // public: virtual bool __cdecl AActor::TeleportTo(struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, bool, bool)
   constexpr uint32_t UEngine_GetGameUserSettings = 0x137F928; // public: class UGameUserSettings * __cdecl UEngine::GetGameUserSettings(void)
+  constexpr uint32_t UGameplayLib_ApplyESPointDamage = 0x1429804; // public: static struct FDamageInfo __cdecl UGameplayLib::ApplyESPointDamage(class AActor *, struct FDamageInfo, struct UE::Math::TVector<double> const &, struct FHitResult const &, class AController *, class AActor *, bool &, struct FWeaponData, float, float, bool)
+  constexpr uint32_t FNetGUIDCache_GetNetGUID = 0x4D91A4C; // public: class FNetworkGUID __cdecl FNetGUIDCache::GetNetGUID(class UObject const *) const
+  constexpr uint32_t UPackageMapClient_GetNetGUIDFromObject = 0x4D91B54; // public: virtual class FNetworkGUID __cdecl UPackageMapClient::GetNetGUIDFromObject(class UObject const *) const
+  constexpr uint32_t FNetGUIDCache_GetObjectFromNetGUID = 0x4D91D74; // public: class UObject * __cdecl FNetGUIDCache::GetObjectFromNetGUID(class FNetworkGUID const &, bool)
+  constexpr uint32_t UWeaponComponent_StartFire = 0x150FE78; // public: void __cdecl UWeaponComponent::StartFire(void)
+  constexpr uint32_t UWeaponComponent_StopFire = 0x171760C; // public: void __cdecl UWeaponComponent::StopFire(void)
+  constexpr uint32_t AESPawn_PostInitializeComponents = 0x1515EEC; // public: virtual void __cdecl AESPawn::PostInitializeComponents(void)
   constexpr uint32_t AESPawn_BeginPlay = 0x155CB70; // protected: virtual void __cdecl AESPawn::BeginPlay(void)
   constexpr uint32_t AESPawn_UpdateShipModules = 0x5DEF910; // public: void __cdecl AESPawn::UpdateShipModules(bool)
   constexpr uint32_t FShipData_Assign = 0x1805FD8; // public: struct FShipData & __cdecl FShipData::operator=(struct FShipData const &)
@@ -121,7 +128,6 @@ namespace es2rva {
   constexpr uint32_t UGameplayLib_ESOpenLevel = 0x5E26144; // public: static void __cdecl UGameplayLib::ESOpenLevel(class UObject const *, class FName, bool, class FString)
   constexpr uint32_t UESGameInstance_PushPause = 0x5DE7B08; // public: static void __cdecl UESGameInstance::PushPause(void)
   constexpr uint32_t UESGameInstance_PopPause = 0x5DE76A8; // public: static void __cdecl UESGameInstance::PopPause(void)
-  constexpr uint32_t AESPawn_PostInitializeComponents = 0x1515EEC; // public: virtual void __cdecl AESPawn::PostInitializeComponents(void)
   constexpr uint32_t UGameplayLib_GetESPlayerPawn = 0x13F0CC0; // public: static class AESPawn * __cdecl UGameplayLib::GetESPlayerPawn(class UObject const *)
   constexpr uint32_t UGameplayLib_GetESPlayerController = 0x150D280; // public: static class AESPlayerController * __cdecl UGameplayLib::GetESPlayerController(class UObject const *)
   constexpr uint32_t UGameplayLib_GetPlayerData = 0x127398C; // public: static class UPlayerData * __cdecl UGameplayLib::GetPlayerData(void)

@@ -298,6 +298,7 @@ static void OnRoleChanged(Role r) {
     loadout::ResetSession();
     g_helloSent = false; g_welcomed = false; g_helloAccum = 0;
     if (r != Role::None) { ApplyNoPause(); travel::ApplyOriginShiftPolicy(true); }
+    combat::SetClientDamageBlock(r == Role::Client);
     if (r == Role::Host) {
         players::SetLocalId(0);
         APlayerController* pc = GetFirstLocalPlayerController(GetWorld());

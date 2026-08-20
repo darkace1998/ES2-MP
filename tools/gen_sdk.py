@@ -91,7 +91,15 @@ RVAS = {
     'AActor_GetVelocity': 'public: virtual struct UE::Math::TVector<double> __cdecl AActor::GetVelocity(void) const',
     'AActor_TeleportTo': 'public: virtual bool __cdecl AActor::TeleportTo(struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, bool, bool)',
     'UEngine_GetGameUserSettings': 'public: class UGameUserSettings * __cdecl UEngine::GetGameUserSettings(void)',
+    # ---- NPC fire mirroring ----
+    'UGameplayLib_ApplyESPointDamage': 'public: static struct FDamageInfo __cdecl UGameplayLib::ApplyESPointDamage(class AActor *, struct FDamageInfo, struct UE::Math::TVector<double> const &, struct FHitResult const &, class AController *, class AActor *, bool &, struct FWeaponData, float, float, bool)',
+    'FNetGUIDCache_GetNetGUID': 'public: class FNetworkGUID __cdecl FNetGUIDCache::GetNetGUID(class UObject const *) const',
+    'UPackageMapClient_GetNetGUIDFromObject': 'regex:^public: virtual class FNetworkGUID __cdecl UPackageMapClient::GetNetGUIDFromObject\\(class UObject const \\*\\) const$',
+    'FNetGUIDCache_GetObjectFromNetGUID': 'public: class UObject * __cdecl FNetGUIDCache::GetObjectFromNetGUID(class FNetworkGUID const &, bool)',
+    'UWeaponComponent_StartFire': 'public: void __cdecl UWeaponComponent::StartFire(void)',
+    'UWeaponComponent_StopFire': 'public: void __cdecl UWeaponComponent::StopFire(void)',
     # ---- client-local ship materialisation ----
+    'AESPawn_PostInitializeComponents': 'public: virtual void __cdecl AESPawn::PostInitializeComponents(void)',
     'AESPawn_BeginPlay': 'protected: virtual void __cdecl AESPawn::BeginPlay(void)',
     'AESPawn_UpdateShipModules': 'public: void __cdecl AESPawn::UpdateShipModules(bool)',
     'FShipData_Assign': 'public: struct FShipData & __cdecl FShipData::operator=(struct FShipData const &)',
@@ -206,7 +214,8 @@ OFFSETS = {
     'APlayerState': ['PlayerId', 'PlayerNamePrivate', 'bIsABot', 'bOnlySpectator', 'UniqueId'],
     'AGameSession': ['MaxSpectators', 'MaxPlayers', 'MaxPartySize'],
     'AGameModeBase': ['GameSessionClass', 'GameStateClass', 'PlayerControllerClass', 'PlayerStateClass', 'HUDClass', 'DefaultPawnClass', 'SpectatorClass', 'ReplaySpectatorPlayerControllerClass', 'ServerStatReplicatorClass', 'GameSession', 'GameState', 'OptionsString', 'bUseSeamlessTravel', 'bStartPlayersAsSpectators', 'bPauseable'],
-    'UNetDriver': ['NetDriverName', 'ClientConnections', 'ServerConnection', 'World', 'NetConnectionClass', 'MaxInternetClientRate', 'MaxClientRate', 'ServerTravelPause', 'ElapsedTime', 'NetServerMaxTickRate'],
+    'UActorComponent': ['OwnerPrivate'],
+    'UNetDriver': ['GuidCache', 'NetDriverName', 'ClientConnections', 'ServerConnection', 'World', 'NetConnectionClass', 'MaxInternetClientRate', 'MaxClientRate', 'ServerTravelPause', 'ElapsedTime', 'NetServerMaxTickRate'],
     'UNetConnection': ['Children', 'Driver', 'PackageMap', 'OpenChannels', 'SentTemporaries', 'ViewTarget', 'OwningActor', 'MaxPacket', 'PlayerController', 'URL', 'LastReceiveTime', 'ClientLoginState', 'PlayerId'],
     'FURL': ['Protocol', 'Host', 'Port', 'Valid', 'Map', 'RedirectURL', 'Op', 'Portal'],
     'FString': [],
@@ -216,7 +225,7 @@ OFFSETS = {
     'UPlayer': ['PlayerController', 'CurrentNetSpeed', 'ConfiguredInternetSpeed', 'ConfiguredLanSpeed'],
     'ULocalPlayer': ['ViewportClient', 'ControllerId'],
     'UHealthComponent': ['HitpointRatio', 'MinHitpointRatio', 'BonusHitpointRatio', 'CannotDeplete'],
-    'AESPawn': ['XP', 'LootDrop', 'ShipData', 'bGetShipModulesFromShipData', 'bGetShipColorsFromShipData', 'bGetDecalsFromShipData'],
+    'AESPawn': ['XP', 'LootDrop', 'bIsPlayerPawn', 'ShipData', 'bGetShipModulesFromShipData', 'bGetShipColorsFromShipData', 'bGetDecalsFromShipData'],
     'AESPlayerController': [],
     'AESGameModeBase': ['ESPlayerPawn', 'ESPlayerController', 'PlayerData'],
     'UESGameInstance': ['bUseWorldOriginShifting', 'WorldOriginShiftingStack'],
@@ -239,7 +248,7 @@ OFFSETS = {
 }
 BITFIELDS = {  # class -> bitfield members  (adds <m>_off and <m>_mask)
     'FActorSpawnParameters': ['bRemoteOwned', 'bNoFail', 'bDeferConstruction', 'bAllowDuringConstructionScript'],
-    'AActor': ['bReplicates', 'bReplicateMovement', 'bNetStartup', 'bOnlyRelevantToOwner', 'bAlwaysRelevant', 'bNetLoadOnClient', 'bNetUseOwnerRelevancy', 'bHidden', 'bTearOff', 'bExchangedRoles', 'bHasFinishedSpawning', 'bActorEnableCollision', 'bCanBeDamaged', 'bReplicateUsingRegisteredSubObjectList'],
+    'AActor': ['bActorIsBeingDestroyed', 'bActorInitialized', 'bReplicates', 'bReplicateMovement', 'bNetStartup', 'bOnlyRelevantToOwner', 'bAlwaysRelevant', 'bNetLoadOnClient', 'bNetUseOwnerRelevancy', 'bHidden', 'bTearOff', 'bExchangedRoles', 'bHasFinishedSpawning', 'bActorEnableCollision', 'bCanBeDamaged', 'bReplicateUsingRegisteredSubObjectList'],
     'APawn': ['bUseControllerRotationPitch', 'bCanAffectNavigationGeneration'],
     'UNetDriver': [],
 }

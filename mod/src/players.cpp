@@ -33,6 +33,12 @@ Player* ByController(APlayerController* pc) {
     return nullptr;
 }
 
+Player* ByPawn(AActor* pawn) {
+    if (!pawn) return nullptr;
+    for (auto& p : g_slots) if (p.alive && p.pawn == pawn) return &p;
+    return nullptr;
+}
+
 Player* Local() {
     for (auto& p : g_slots) if (p.alive && p.local) return &p;
     return nullptr;

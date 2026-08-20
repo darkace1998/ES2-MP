@@ -198,7 +198,8 @@ void StashForPlayer(int playerId, const std::string& text) {
 static uint64_t g_localApplied = 0;
 static bool g_autoLocalShip = true;
 static Fn_PawnVoid o_BeginPlay = nullptr;
-static uint64_t g_preBeginPlay = 0;
+static Fn_PawnVoid o_PostInitComponents = nullptr;
+static uint64_t g_preBeginPlay = 0, g_prePostInit = 0;
 
 // Copy this machine's own current ship into a pawn's FShipData. Returns false if we have no ship.
 static bool CopyOwnShipInto(AActor* pawn) {
@@ -217,10 +218,38 @@ static bool CopyOwnShipInto(AActor* pawn) {
     return ok;
 }
 
-// THE fix for "the client cannot shoot / cannot equip": a replicated pawn arrives with an empty
-// FShipData (ES2 never replicates it), and by the time BeginPlay has run the ship has already built
-// itself as an unarmed default. Filling ShipData *before* the original BeginPlay lets the vanilla setup
-// build the real weapons, modules and equipment from the client's own save.
+// Is this (client-side) pawn our own ship? At PostInitializeComponents time there is no controller yet
+// and the net role is not settled, so use the class's own flag: AESPawn::bIsPlayerPawn is set on the
+// player-ship Blueprint and false for every NPC ship.
+static bool LooksLikeOurShip(AActor* pawn) {
+    if (!pawn) return false;
+    UClass* esPawn = FindClass("/Script/ES2.ESPawn");
+    if (!esPawn || !IsA((UObject*)pawn, esPawn)) return false;
+    return UE_FIELD(bool, pawn, es2off::AESPawn::bIsPlayerPawn);
+}
+
+// THE fix for "the client cannot shoot / cannot equip".
+//
+// ES2 never replicates AESPawn::ShipData, so a client's own ship arrives empty. The build that turns
+// ShipData into weapons, devices and consumables is NOT authority-gated — it is
+// UWeaponComponent::InitializeComponent (and UDeviceComponent::Init, UConsumableComponent::InitializeComponent),
+// each gated only on `Owner->ShipData.Inventory != null`. Those all run inside
+// APawn::PostInitializeComponents, which is STRICTLY BEFORE BeginPlay. Filling ShipData in a BeginPlay
+// hook was therefore always too late — the components had already decided the ship was empty.
+// Filling it here, before the original PostInitializeComponents, lets the vanilla path build everything.
+static void H_PostInitComponents(AActor* pawn) {
+    if (pawn && coop::CurrentRole() == coop::Role::Client && g_autoLocalShip && LooksLikeOurShip(pawn)) {
+        void* sd = reinterpret_cast<char*>(pawn) + es2off::AESPawn::ShipData;
+        if (UE_FIELD(UObject*, sd, es2off::FShipData::ShipItemInstance) == nullptr && CopyOwnShipInto(pawn)) {
+            ++g_prePostInit;
+            LOGF("[loadout] filled our own ShipData on %s before PostInitializeComponents", GetName((UObject*)pawn).c_str());
+        }
+    }
+    o_PostInitComponents(pawn);
+}
+
+// Kept as a late backstop for pawns that somehow slipped past the above (e.g. a pawn that existed before
+// the mod decided we were a client).
 static void H_BeginPlay(AActor* pawn) {
     if (pawn && coop::CurrentRole() == coop::Role::Client && g_autoLocalShip) {
         uint8_t role = UE_FIELD(uint8_t, pawn, es2off::AActor::Role);
@@ -529,8 +558,9 @@ static void CmdShipData(const console::Args& a, std::string& out) {
         if (a.size() > 2 && a[2] == "auto") { g_autoLocalShip = a.size() > 3 ? a[3] == "1" : true; }
         else if (a.size() > 2 && a[2] == "build") { std::string log; int n = BuildWeaponsLocally(pawn, log); out += log + Format("filled %d slot(s)\n", n); }
         else out += ApplyOwnShipLocally(pawn, err) ? "applied our own ship to the local pawn\n" : ("failed: " + err + "\n");
-        out += Format("autoLocalShip=%d applied=%llu preBeginPlay=%llu localShipEmpty=%d\n", (int)g_autoLocalShip,
-                      (unsigned long long)g_localApplied, (unsigned long long)g_preBeginPlay, (int)LocalShipIsEmpty(pawn));
+        out += Format("autoLocalShip=%d applied=%llu prePostInit=%llu preBeginPlay=%llu localShipEmpty=%d\n", (int)g_autoLocalShip,
+                      (unsigned long long)g_localApplied, (unsigned long long)g_prePostInit,
+                      (unsigned long long)g_preBeginPlay, (int)LocalShipIsEmpty(pawn));
     } else if (sub == "stash") {
         for (auto& [id, s] : g_stash) out += Format("  player %d: %zu chars applied=%d\n", id, s.size(), (int)g_applied[id]);
         if (g_stash.empty()) out += "  (none)\n";
@@ -582,6 +612,8 @@ void Register() {
 
 void OnInit() {
     hooks::Install("UInventoryLib::GetCurrentShip", es2rva::UInventoryLib_GetCurrentShip, (void*)&H_GetCurrentShip, (void**)&o_GetCurrentShip);
+    hooks::Install("AESPawn::PostInitializeComponents", es2rva::AESPawn_PostInitializeComponents,
+                   (void*)&H_PostInitComponents, (void**)&o_PostInitComponents);
     hooks::Install("AESPawn::BeginPlay", es2rva::AESPawn_BeginPlay, (void*)&H_BeginPlay, (void**)&o_BeginPlay);
 }
 

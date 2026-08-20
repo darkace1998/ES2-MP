@@ -210,6 +210,8 @@ namespace es2off {
     constexpr uint32_t bActorInitialized = 0x5C; // unsigned char : 1 @bit1 (size 1) from AActor
     constexpr uint32_t bActorIsBeingDestroyed = 0x5D; // unsigned char : 1 @bit0 (size 1) from AActor
     constexpr uint32_t ActorHasBegunPlay = 0x5D; // AActor::EActorBeginPlayState : 2 @bit2 (size 1) from AActor
+    constexpr uint32_t bActorIsBeingDestroyed_off = 0x5D; constexpr uint32_t bActorIsBeingDestroyed_mask = 0x1; // unsigned char : 1 @bit0 from AActor
+    constexpr uint32_t bActorInitialized_off = 0x5C; constexpr uint32_t bActorInitialized_mask = 0x2; // unsigned char : 1 @bit1 from AActor
     constexpr uint32_t bReplicates_off = 0x5B; constexpr uint32_t bReplicates_mask = 0x8; // unsigned char : 1 @bit3 from AActor
     constexpr uint32_t bReplicateMovement_off = 0x58; constexpr uint32_t bReplicateMovement_mask = 0x10; // unsigned char : 1 @bit4 from AActor
     constexpr uint32_t bNetStartup_off = 0x58; constexpr uint32_t bNetStartup_mask = 0x2; // unsigned char : 1 @bit1 from AActor
@@ -285,8 +287,13 @@ namespace es2off {
     constexpr uint32_t bStartPlayersAsSpectators = 0x328; // unsigned : 1 @bit1 (size 4) from AGameModeBase
     constexpr uint32_t bPauseable = 0x328; // unsigned : 1 @bit2 (size 4) from AGameModeBase
   }
+  namespace UActorComponent {
+    constexpr uint32_t __size = 160;
+    constexpr uint32_t OwnerPrivate = 0x90; // AActor * (size 8) from UActorComponent
+  }
   namespace UNetDriver {
     constexpr uint32_t __size = 2256;
+    constexpr uint32_t GuidCache = 0x1B8; // TSharedPtr<FNetGUIDCache,1> (size 16) from UNetDriver
     constexpr uint32_t NetDriverName = 0x200; // FName (size 8) from UNetDriver
     constexpr uint32_t ClientConnections = 0xF8; // TArray<TObjectPtr<UNetConnection>,TSizedDefaultAllocator<32> > (size 16) from UNetDriver
     constexpr uint32_t ServerConnection = 0xF0; // TObjectPtr<UNetConnection> (size 8) from UNetDriver
@@ -392,6 +399,7 @@ namespace es2off {
     constexpr uint32_t __size = 4912;
     constexpr uint32_t XP = 0x3B8; // UXPComponent * (size 8) from AESPawn
     constexpr uint32_t LootDrop = 0x3A8; // ULootDropComponent * (size 8) from AESPawn
+    constexpr uint32_t bIsPlayerPawn = 0x10C1; // bool (size 1) from AESPawn
     constexpr uint32_t ShipData = 0x4B8; // FShipData (size 976) from AESPawn
     constexpr uint32_t bGetShipModulesFromShipData = 0x8B8; // bool (size 1) from AESPawn
     constexpr uint32_t bGetShipColorsFromShipData = 0x9D8; // bool (size 1) from AESPawn

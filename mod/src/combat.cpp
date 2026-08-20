@@ -17,6 +17,8 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cmath>
+#include <map>
+#include <cstring>
 
 using namespace ue;
 using es2coop::Format;
@@ -108,6 +110,100 @@ static void H_StopFireSecondary(APlayerController* pc) {
     o_StopFireSecondary(pc);
 }
 
+// ---------------------------------------------------------------- NPC fire mirroring
+//
+// NPC weapons exist on the client (their actors spawn locally as children of the replicated pawn) but
+// nothing ever pulls their trigger: the AI runs only on the host and ES2 replicates none of it, so on a
+// client the enemies look inert while the host sees them shooting. Mirror just the trigger.
+//
+// Cross-machine identity is the hard part — the same NPC is a different UObject on each machine. UE
+// already solves it: replicated actors carry a NetGUID assigned by the server's FNetGUIDCache, and the
+// client can resolve it back through its own driver's cache.
+using Fn_WeaponVoid = void (*)(UObject* weaponComponent);
+// FNetworkGUID is 8 bytes but NOT trivially copyable, so it is returned through a hidden pointer.
+// Member function => (this=RCX, sret=RDX, args...). Getting this wrong put the UObject* into the sret
+// slot, which is what faulted inside FNetGUIDCache::SupportsObject earlier.
+using Fn_GetNetGUID = void (*)(void* guidCache, uint64_t* sretGuid, const UObject* obj);
+using Fn_GetObjectFromNetGUID = UObject* (*)(void* guidCache, const uint64_t* guid, bool ignoreDeleted);
+
+static Fn_WeaponVoid o_StartFire = nullptr, o_StopFire = nullptr;
+static bool g_mirrorNpcFire = true;
+static uint64_t g_npcFireSent = 0, g_npcFireApplied = 0, g_npcFireUnresolved = 0, g_npcFireDeduped = 0;
+// The AI calls StartFire/StopFire far more often than the state actually changes (8000+ calls in half a
+// minute), which would swamp a reliable channel. Only transitions are sent.
+static std::map<UObject*, bool> g_npcFireState;
+
+static void* LocalGuidCache() {
+    UNetDriver* nd = GetNetDriver(GetWorld());
+    return nd ? UE_FIELD(void*, nd, es2off::UNetDriver::GuidCache) : nullptr;   // TSharedPtr: object first
+
+}
+
+// Identity across machines: the same NPC is a different UObject on each side, but UE already solved this
+// — replicated actors carry a NetGUID from the server's FNetGUIDCache, and the client resolves it through
+// its own driver's cache.
+static void MirrorNpcFire(UObject* wc, bool down) {
+    if (!g_mirrorNpcFire || coop::CurrentRole() != coop::Role::Host || !wc) return;
+    AActor* owner = UE_FIELD(AActor*, wc, es2off::UActorComponent::OwnerPrivate);
+    if (!owner || !IsValidObject((UObject*)owner)) return;
+    if ((UE_FIELD(uint8_t, owner, es2off::AActor::bActorIsBeingDestroyed_off) & es2off::AActor::bActorIsBeingDestroyed_mask) != 0) return;
+    if (players::ByPawn(owner)) return;                    // a player's own weapons already work
+    if (players::Count() < 2) return;                      // nobody to tell
+
+    auto it = g_npcFireState.find(wc);
+    if (it != g_npcFireState.end() && it->second == down) { ++g_npcFireDeduped; return; }
+    g_npcFireState[wc] = down;
+
+    void* cache = LocalGuidCache();
+    if (!cache) return;
+    uint64_t guid = 0;
+    Rva<std::remove_pointer_t<Fn_GetNetGUID>>(es2rva::FNetGUIDCache_GetNetGUID)(cache, &guid, (const UObject*)owner);
+    if (!guid) return;                                     // not replicated to anyone yet
+    int cat = (int)UE_FIELD(uint8_t, wc, es2off::UWeaponComponent::WeaponCategory);
+    ++g_npcFireSent;
+    coop::SendToAllClients(Format("WF|%llu|%d|%d", (unsigned long long)guid, cat, (int)down));
+}
+
+// A client must never apply damage: the host owns the simulation. Left unblocked, mirrored NPC fire makes
+// projectiles impact locally and run ES2's damage path, which calls
+// AESGameModeBase::CheckForItemDamageChangingEffects_BP on a game mode that does not exist on a client —
+// an instant crash. FDamageInfo is a 12-byte POD, so the no-op just returns a zeroed one.
+// The detour deliberately declares fewer parameters than the caller passes: MS x64 is caller-cleanup, so
+// that is safe, but it also means we cannot forward — hence the hook is only ENABLED while we are a client.
+static bool g_damageBlockOn = false;
+static void* H_ApplyESPointDamage(void* sretDamageInfo) {
+    if (sretDamageInfo) memset(sretDamageInfo, 0, 12);
+    return sretDamageInfo;
+}
+void SetClientDamageBlock(bool on) {
+    if (g_damageBlockOn == on) return;
+    g_damageBlockOn = on;
+    hooks::Enable("UGameplayLib::ApplyESPointDamage", on);
+    LOGF("[combat] client-side damage %s", on ? "BLOCKED (host is authoritative)" : "allowed");
+}
+
+static void H_StartFire(UObject* wc) { o_StartFire(wc); MirrorNpcFire(wc, true); }
+static void H_StopFire(UObject* wc)  { o_StopFire(wc);  MirrorNpcFire(wc, false); }
+
+static bool ApplyNpcFire(const std::string& body) {
+    unsigned long long guid = 0; int cat = 0, down = 0;
+    if (sscanf(body.c_str(), "%llu|%d|%d", &guid, &cat, &down) != 3) return true;
+    void* cache = LocalGuidCache();
+    if (!cache) return true;
+    uint64_t g = guid;
+    UObject* obj = Rva<std::remove_pointer_t<Fn_GetObjectFromNetGUID>>(es2rva::FNetGUIDCache_GetObjectFromNetGUID)(cache, &g, false);
+    AActor* best = (obj && IsValidObject(obj)) ? (AActor*)obj : nullptr;
+    if (!best) { ++g_npcFireUnresolved; return true; }
+    const char* prop = cat == 0 ? "PrimaryWeapons" : "SecondaryWeapons";
+    UObject* wc = nullptr;
+    for (auto& p : GetProperties((UStruct*)GetClass((UObject*)best), true))
+        if (p.Name == prop) { wc = UE_FIELD(UObject*, best, p.Offset); break; }
+    if (!wc || !IsValidObject(wc)) { ++g_npcFireUnresolved; return true; }
+    if (down) o_StartFire(wc); else o_StopFire(wc);        // originals: never re-enter our own hook
+    ++g_npcFireApplied;
+    return true;
+}
+
 // ---------------------------------------------------------------- messages
 bool OnServerOp(APlayerController* from, const std::string& op, const std::string& body) {
     if (op == "F") {
@@ -120,6 +216,7 @@ bool OnServerOp(APlayerController* from, const std::string& op, const std::strin
 }
 
 bool OnClientOp(const std::string& op, const std::string& body) {
+    if (op == "WF") return ApplyNpcFire(body);
     if (op == "HP") {
         // HP|<playerId>|<healthRatio>|<shieldRatio>  — informational for the partner's HUD/logging
         int id = 0; float hp = 0, sh = 0;
@@ -165,6 +262,10 @@ static void CmdCombat(const console::Args& a, std::string& out) {
     if (a.size() > 2 && a[1] == "route") g_routeFire = a[2] == "1";
     if (a.size() > 2 && a[1] == "localfire") g_localFire = a[2] == "1";
     if (a.size() > 2 && a[1] == "hphz") g_healthHz = (float)atof(a[2].c_str());
+    if (a.size() > 2 && a[1] == "npcfire") g_mirrorNpcFire = a[2] == "1";
+    out += Format("npcFireMirror=%d sent=%llu applied=%llu unresolved=%llu deduped=%llu\n", (int)g_mirrorNpcFire,
+                  (unsigned long long)g_npcFireSent, (unsigned long long)g_npcFireApplied,
+                  (unsigned long long)g_npcFireUnresolved, (unsigned long long)g_npcFireDeduped);
     out += Format("routeFire=%d localFire=%d healthHz=%.0f fireSent=%llu fireApplied=%llu\n",
                   (int)g_routeFire, (int)g_localFire, g_healthHz,
                   (unsigned long long)g_fireSent, (unsigned long long)g_fireApplied);
@@ -262,6 +363,12 @@ void Register() {
 }
 
 void OnInit() {
+    // installed but left OFF; coop enables it only while this process is a network client
+    { void* orig = nullptr;
+      hooks::Install("UGameplayLib::ApplyESPointDamage", es2rva::UGameplayLib_ApplyESPointDamage, (void*)&H_ApplyESPointDamage, &orig);
+      hooks::Enable("UGameplayLib::ApplyESPointDamage", false); }
+    hooks::Install("UWeaponComponent::StartFire", es2rva::UWeaponComponent_StartFire, (void*)&H_StartFire, (void**)&o_StartFire);
+    hooks::Install("UWeaponComponent::StopFire", es2rva::UWeaponComponent_StopFire, (void*)&H_StopFire, (void**)&o_StopFire);
     hooks::Install("AESPlayerController::InputStartFirePrimary", es2rva::AESPlayerController_InputStartFirePrimary, (void*)&H_StartFirePrimary, (void**)&o_StartFirePrimary);
     hooks::Install("AESPlayerController::InputStopFirePrimary", es2rva::AESPlayerController_InputStopFirePrimary, (void*)&H_StopFirePrimary, (void**)&o_StopFirePrimary);
     hooks::Install("AESPlayerController::InputStartFireSecondary", es2rva::AESPlayerController_InputStartFireSecondary, (void*)&H_StartFireSecondary, (void**)&o_StartFireSecondary);

@@ -109,6 +109,22 @@ def main():
         mm = re.search(r'applied=(\d+)', t); return int(mm.group(1)) if mm else -1
     check('loot drop mirrored to the client', applied(after) > applied(before), f'{applied(before)} -> {applied(after)}')
 
+    # --- the client's own ship must be fully built locally (weapons + equipment) ---
+    cw = con(CLIENT, 'shipdata weapons')
+    prim = re.search(r'PrimaryWeapons: (\d+) slot', cw)
+    sec = re.search(r'SecondaryWeapons: (\d+) slot', cw)
+    empties = cw.count('(empty)')
+    check("client's own ship is armed locally",
+          bool(prim and int(prim.group(1)) > 0) and bool(sec and int(sec.group(1)) > 0) and empties == 0,
+          f"primary={prim.group(1) if prim else '?'} secondary={sec.group(1) if sec else '?'} empty={empties}")
+    lo = con(CLIENT, 'shipdata local')
+    check('client ship data filled before PostInitializeComponents', 'prePostInit=' in lo and 'prePostInit=0' not in lo,
+          [l for l in lo.split('\n') if 'prePostInit' in l][:1])
+
+    # --- client must not simulate damage, and must see NPCs shooting ---
+    cb = con(CLIENT, 'combat')
+    check('client-side damage suppressed / NPC fire mirroring on', 'npcFireMirror=1' in cb)
+
     rs = con(HOST, 'respawn')
     check('co-op death handling armed', 'respawn=1' in rs and 'vetoGameOverPawn=1' in rs, rs.strip().split('\n')[0][:90])
     at = con(HOST, 'attribution')

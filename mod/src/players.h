@@ -34,6 +34,7 @@ Player* RegisterController(ue::APlayerController* pc);
 Player* RegisterLocalAs(ue::APlayerController* pc, int id);
 void UnregisterController(ue::APlayerController* pc);
 Player* ByController(ue::APlayerController* pc);
+Player* ByPawn(ue::AActor* pawn);
 Player* ById(int id);
 Player* Local();
 int Count();
