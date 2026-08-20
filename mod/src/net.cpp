@@ -4,6 +4,8 @@
 #include "log.h"
 #include "hooks.h"
 #include "coop.h"
+#include "loadout.h"
+#include "players.h"
 #include <windows.h>
 #include <cstdlib>
 
@@ -105,9 +107,35 @@ static void H_RestartPlayer(AGameModeBase* gm, void* c) {
     UObject* pawn = c ? UE_FIELD(UObject*, c, es2off::AController::Pawn) : nullptr;
     LOGF("[net] RestartPlayer done -> pawn=%s", GetFullName(pawn).c_str());
 }
+// AESGameModeBase::SpawnDefaultPawnAtTransform_Implementation is written for exactly one player: it
+// caches the spawned pawn/controller/playerdata on the game mode (+0x508/+0x510/+0x518) and fills the
+// pawn's ShipData from the process-global UPlayerData. When it runs for a joining CLIENT that clobbers
+// the host's own game-mode state (out-of-bounds checks, jump handling and more then act on the wrong
+// pawn). So for a remote controller we snapshot those fields, and restore them afterwards.
 static void* H_SpawnDefaultPawnAtTransform(AGameModeBase* gm, void* c, const FTransform* t) {
-    LOGF("[net] ES SpawnDefaultPawnAtTransform controller=%s at (%.0f,%.0f,%.0f)", GetFullName((UObject*)c).c_str(), t->Translation.X, t->Translation.Y, t->Translation.Z);
+    bool remote = c && UE_FIELD(void*, c, es2off::APlayerController::NetConnection) != nullptr;
+    LOGF("[net] ES SpawnDefaultPawnAtTransform controller=%s remote=%d at (%.0f,%.0f,%.0f)",
+         GetFullName((UObject*)c).c_str(), (int)remote, t->Translation.X, t->Translation.Y, t->Translation.Z);
+
+    void* savedPawn = nullptr; void* savedPC = nullptr; void* savedPD = nullptr;
+    bool substituting = false;
+    if (remote && gm) {
+        savedPawn = UE_FIELD(void*, gm, es2off::AESGameModeBase::ESPlayerPawn);
+        savedPC   = UE_FIELD(void*, gm, es2off::AESGameModeBase::ESPlayerController);
+        savedPD   = UE_FIELD(void*, gm, es2off::AESGameModeBase::PlayerData);
+        players::Player* pl = players::ByController((APlayerController*)c);
+        if (pl) substituting = loadout::BeginSubstitution(pl->id);
+    }
+
     void* r = o_SpawnDefaultPawnAtTransform(gm, c, t);
+
+    if (substituting) loadout::EndSubstitution();
+    if (remote && gm) {
+        UE_FIELD(void*, gm, es2off::AESGameModeBase::ESPlayerPawn) = savedPawn;
+        UE_FIELD(void*, gm, es2off::AESGameModeBase::ESPlayerController) = savedPC;
+        UE_FIELD(void*, gm, es2off::AESGameModeBase::PlayerData) = savedPD;
+        LOGF("[net] restored host game-mode state after remote spawn (pawn=%s)", GetName((UObject*)savedPawn).c_str());
+    }
     LOGF("[net] ES SpawnDefaultPawnAtTransform -> %s", GetFullName((UObject*)r).c_str());
     return r;
 }

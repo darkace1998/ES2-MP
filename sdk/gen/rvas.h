@@ -97,5 +97,19 @@ namespace es2rva {
   constexpr uint32_t AESPawn_StartFire = 0x1717828; // public: void __cdecl AESPawn::StartFire(bool)
   constexpr uint32_t AESPawn_AreControlsDisabled = 0x2B41704; // public: bool __cdecl AESPawn::AreControlsDisabled(void)
   constexpr uint32_t UWeaponComponent_SetAllowFire = 0x17174E8; // public: void __cdecl UWeaponComponent::SetAllowFire(bool)
+  constexpr uint32_t UInventoryLib_GetCurrentShip = 0x121A1E0; // public: static struct FShipData __cdecl UInventoryLib::GetCurrentShip(void)
+  constexpr uint32_t UInventoryLib_GetPlayerShip = 0x1805EE0; // public: static struct FShipData __cdecl UInventoryLib::GetPlayerShip(int)
+  constexpr uint32_t FShipData_GetShipDataState = 0x5D968B8; // public: struct FShipDataState __cdecl FShipData::GetShipDataState(void)
+  constexpr uint32_t FShipData_StaticStruct = 0x5BC6690; // public: static class UScriptStruct * __cdecl FShipData::StaticStruct(void)
+  constexpr uint32_t FShipDataState_StaticStruct = 0x5BC66C8; // public: static class UScriptStruct * __cdecl FShipDataState::StaticStruct(void)
+  constexpr uint32_t UInventory_CreateShipDataFromState = 0x5E98CF0; // public: static struct FShipData __cdecl UInventory::CreateShipDataFromState(struct FShipDataState &)
+  constexpr uint32_t UScriptStruct_InitializeStruct = 0x11FC20C; // public: virtual void __cdecl UScriptStruct::InitializeStruct(void *, int) const
+  constexpr uint32_t UScriptStruct_DestroyStruct = 0x11FC060; // public: virtual void __cdecl UScriptStruct::DestroyStruct(void *, int) const
+  constexpr uint32_t UScriptStruct_ExportText = 0x2D01634; // public: void __cdecl UScriptStruct::ExportText(class FString &, void const *, void const *, class UObject *, int, class UObject *, bool) const
+  constexpr uint32_t UScriptStruct_ImportText = 0x2D06F3C; // public: wchar_t const * __cdecl UScriptStruct::ImportText(wchar_t const *, void *, class UObject *, int, class FOutputDevice *, class FString const &, bool) const
+  constexpr uint32_t UGameplayLib_RefreshPlayerShipData = 0x5E37DA4; // public: static void __cdecl UGameplayLib::RefreshPlayerShipData(void)
+  constexpr uint32_t AController_UnPossess = 0x150A9F4; // public: virtual void __cdecl AController::UnPossess(void)
+  constexpr uint32_t AController_Possess = 0x16ACD68; // public: virtual void __cdecl AController::Possess(class APawn *)
+  constexpr uint32_t AESHUD_Tick = 0x13F2384; // public: virtual void __cdecl AESHUD::Tick(float)
   constexpr uint32_t AESGameModeBase_GetESGameMode = 0x1505960; // public: static class AESGameModeBase * __cdecl AESGameModeBase::GetESGameMode(class UObject const *)
 }

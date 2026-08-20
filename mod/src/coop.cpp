@@ -11,6 +11,7 @@
 #include "log.h"
 #include "hooks.h"
 #include "combat.h"
+#include "loadout.h"
 #include <windows.h>
 #include <cmath>
 #include <cstring>
@@ -229,6 +230,7 @@ bool OnServerMessage(APlayerController* fromPC, const std::string& raw) {
     }
     if (op == "SAY") { LOGF("[coop] say(client): %s", body.c_str()); SendToAllClients("SAY|" + body); return true; }
     if (combat::OnServerOp(fromPC, op, body)) return true;
+    if (loadout::OnServerOp(fromPC, op, body)) return true;
     LOGF("[coop] unhandled client op '%s'", op.c_str());
     return true;
 }
@@ -265,6 +267,7 @@ bool OnClientMessage(APlayerController* toPC, const std::string& raw) {
     }
     if (op == "SAY") { LOGF("[coop] say(host): %s", body.c_str()); return true; }
     if (combat::OnClientOp(op, body)) return true;
+    if (loadout::OnClientOp(op, body)) return true;
     LOGF("[coop] unhandled host op '%s'", op.c_str());
     return true;
 }
@@ -281,6 +284,7 @@ static double g_helloAccum = 0;
 static void OnRoleChanged(Role r) {
     LOGF("[coop] role -> %s (world %s)", RoleName(r), WorldName(GetWorld()).c_str());
     players::Reset();
+    loadout::ResetSession();
     g_helloSent = false; g_welcomed = false; g_helloAccum = 0;
     if (r != Role::None) ApplyNoPause();
     if (r == Role::Host) {
@@ -317,6 +321,7 @@ static void Tick(float dt) {
         EnforceMovementAuthority();
         SmoothRemotePawns(dt);
         combat::Tick(dt, true);
+        loadout::HostTick(dt);
     } else if (r == Role::Client) {
         // The first HELLO can be dropped if it beats the connection into steady state; retry until acknowledged.
         if (!g_welcomed && LocalPawn()) {
@@ -326,6 +331,7 @@ static void Tick(float dt) {
         g_sendAccum += dt;
         if (g_sendAccum >= 1.0 / g_sendHz) { g_sendAccum = 0; SendLocalTransform(); }
         SmoothRemotePawns(dt);   // other players' ships, fed by the host's PT relay
+        if (g_welcomed) { loadout::MaybeSendOnJoin(); loadout::ClientTick(dt); }
     }
 }
 

@@ -384,18 +384,53 @@ namespace es2off {
   }
   namespace AESPawn {
     constexpr uint32_t __size = 4912;
+    constexpr uint32_t ShipData = 0x4B8; // FShipData (size 976) from AESPawn
+    constexpr uint32_t bGetShipModulesFromShipData = 0x8B8; // bool (size 1) from AESPawn
+    constexpr uint32_t bGetShipColorsFromShipData = 0x9D8; // bool (size 1) from AESPawn
+    constexpr uint32_t bGetDecalsFromShipData = 0xA78; // bool (size 1) from AESPawn
   }
   namespace AESPlayerController {
     constexpr uint32_t __size = 3120;
   }
   namespace AESGameModeBase {
     constexpr uint32_t __size = 1432;
+    constexpr uint32_t ESPlayerPawn = 0x508; // AESPawn * (size 8) from AESGameModeBase
+    constexpr uint32_t ESPlayerController = 0x510; // AESPlayerController * (size 8) from AESGameModeBase
+    constexpr uint32_t PlayerData = 0x518; // UPlayerData * (size 8) from AESGameModeBase
   }
   namespace UESGameInstance {
     constexpr uint32_t __size = 4448;
   }
   namespace UPlayerData {
     constexpr uint32_t __size = 8624;
+    constexpr uint32_t Ships = 0x468; // TArray<FShipData,TSizedDefaultAllocator<32> > (size 16) from UPlayerData
+    constexpr uint32_t ShipsSaveState = 0x478; // TArray<FShipDataState,TSizedDefaultAllocator<32> > (size 16) from UPlayerData
+    constexpr uint32_t CurrentShip = 0x119C; // int (size 4) from UPlayerData
+  }
+  namespace UItem {
+    constexpr uint32_t __size = 632;
+    constexpr uint32_t ItemTemplateID = 0x28; // FName (size 8) from UItem
+    constexpr uint32_t Seed = 0x40; // int (size 4) from UItem
+    constexpr uint32_t NameSeed = 0x44; // int (size 4) from UItem
+    constexpr uint32_t ItemLevel = 0x58; // int (size 4) from UItem
+    constexpr uint32_t Rarity = 0x60; // TEnumAsByte<enum EItemRarity::Type> (size 1) from UItem
+  }
+  namespace FWeaponInfo {
+    constexpr uint32_t __size = 80;
+    constexpr uint32_t WeaponItem = 0x0; // UItem * (size 8) from FWeaponInfo
+    constexpr uint32_t WeaponClass = 0x8; // TSoftClassPtr<AWeaponBase> (size 40) from FWeaponInfo
+    constexpr uint32_t SpawnedWeapons = 0x30; // TArray<AWeaponBase *,TSizedDefaultAllocator<32> > (size 16) from FWeaponInfo
+  }
+  namespace UWeaponComponent {
+    constexpr uint32_t __size = 2512;
+    constexpr uint32_t WeaponSlots = 0x238; // TArray<FWeaponInfo,TSizedDefaultAllocator<32> > (size 16) from UWeaponComponent
+  }
+  namespace FShipData {
+    constexpr uint32_t __size = 976;
+    constexpr uint32_t Name = 0x0; // FText (size 16) from FShipData
+    constexpr uint32_t Inventory = 0x10; // UInventory * (size 8) from FShipData
+    constexpr uint32_t ShipItemInstance = 0x18; // UItem * (size 8) from FShipData
+    constexpr uint32_t UltimateDevice = 0x20; // UItem * (size 8) from FShipData
   }
   namespace UShipMovementComponent {
     constexpr uint32_t __size = 2848;

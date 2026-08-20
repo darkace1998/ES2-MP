@@ -26,6 +26,24 @@ namespace authority {
 using Fn_SpawnActor_T = AActor* (*)(UWorld*, UClass*, const FTransform*, const void* params);
 static Fn_SpawnActor_T o_SpawnActor = nullptr;
 
+// AESHUD::Tick dereferences the local player pawn without a null check. In multiplayer the pawn is
+// briefly absent (respawn with a different ship, death, travel), which crashed the client. Skip the
+// tick during those gaps instead of letting it fault.
+using Fn_HudTick = void (*)(void* hud, float dt);
+static Fn_HudTick o_HudTick = nullptr;
+static uint64_t g_hudSkipped = 0;
+static void H_HudTick(void* hud, float dt) {
+    UWorld* w = GetWorld();
+    if (w) {
+        APlayerController* pc = GetFirstLocalPlayerController(w);
+        if (!pc || UE_FIELD(void*, pc, es2off::AController::Pawn) == nullptr) {
+            if (++g_hudSkipped % 120 == 1) LOGF("[authority] HUD tick skipped (no local pawn) x%llu", (unsigned long long)g_hudSkipped);
+            return;
+        }
+    }
+    o_HudTick(hud, dt);
+}
+
 static bool g_log = false;         // record a per-class spawn census
 static bool g_guard = false;       // actually block client-side gameplay spawns
 static bool g_guardVerbose = false;
@@ -135,6 +153,7 @@ void Register() {
 }
 void OnInit() {
     hooks::Install("UWorld::SpawnActor(Transform)", es2rva::UWorld_SpawnActor_Transform, (void*)&H_SpawnActor, (void**)&o_SpawnActor);
+    hooks::Install("AESHUD::Tick", es2rva::AESHUD_Tick, (void*)&H_HudTick, (void**)&o_HudTick);
 }
 bool GuardEnabled() { return g_guard; }
 }

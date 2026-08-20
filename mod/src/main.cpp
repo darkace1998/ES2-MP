@@ -11,6 +11,7 @@ namespace net { void Register(); void OnInit(); }
 #include "coop.h"
 #include "authority.h"
 #include "combat.h"
+#include "loadout.h"
 
 namespace {
 HMODULE g_self = nullptr;
@@ -48,6 +49,7 @@ DWORD WINAPI InitThread(LPVOID) {
     coop::Register();
     authority::Register();
     combat::Register();
+    loadout::Register();
 
     // console port: base 27100 (+0.. depending on free)
     int basePort = 27100;
@@ -62,6 +64,7 @@ DWORD WINAPI InitThread(LPVOID) {
     coop::OnInit();
     authority::OnInit();
     combat::OnInit();
+    loadout::OnInit();
     g_initialized = true;
     LOGF("init complete");
     return 0;

@@ -174,6 +174,23 @@ static void CmdCombat(const console::Args& a, std::string& out) {
     }
 }
 
+// god [0|1] - make the local ship's hull and shield undepletable. Test aid: an idle host parked next to
+// enemies otherwise dies mid-experiment and invalidates the run.
+static void CmdGod(const console::Args& a, std::string& out) {
+    bool on = !(a.size() > 1 && (a[1] == "0" || a[1] == "off"));
+    APlayerController* pc = LocalPC();
+    AActor* pawn = pc ? UE_FIELD(AActor*, pc, es2off::AController::Pawn) : nullptr;
+    if (!pawn) { out = "no local pawn\n"; return; }
+    int n = 0;
+    for (const char* cls : {"HealthComponent", "ShieldComponent", "ArmorComponent"}) {
+        UObject* c = FindComponentOfClass(pawn, cls);
+        if (!c) continue;
+        UE_FIELD(bool, c, es2off::UHealthComponent::CannotDeplete) = on;
+        ++n;
+    }
+    out += Format("god=%d applied to %d component(s) of %s\n", (int)on, n, GetName((UObject*)pawn).c_str());
+}
+
 static void CmdHp(const console::Args& a, std::string& out) {
     // hp [ClassFilter] — health/shield of matching pawns in the world
     std::string cls = a.size() > 1 ? a[1] : "ESPawn";
@@ -190,6 +207,7 @@ void Register() {
     console::Register("fire", "fire [primary|secondary] [on|off] - press the local fire trigger (routes to host on a client)", CmdFire);
     console::Register("combat", "combat [route 0/1|localfire 0/1|hphz N] - fire-routing status and player health", CmdCombat);
     console::Register("hp", "hp [Class] - health/shield ratios of pawns in the world", CmdHp);
+    console::Register("god", "god [0|1] - make the local ship undepletable (test aid)", CmdGod);
 }
 
 void OnInit() {
