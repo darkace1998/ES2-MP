@@ -190,10 +190,17 @@ static void* H_ApplyESPointDamage(void* sretDamageInfo) {
     if (sretDamageInfo) memset(sretDamageInfo, 0, 12);
     return sretDamageInfo;
 }
+// Radial damage reaches the same dead end by a different road: AProjectileBase::OnImpact -> Explode ->
+// ApplyESRadialDamage -> AWeaponBase::CheckForItemDamageChangingEffects ->
+// AESGameModeBase::CheckForItemDamageChangingEffects_BP on a null game mode. Blocking only the point
+// path left every explosive impact near a client fatal (observed: AV reading 0x10 with that stack).
+// Returns bool rather than a struct, so the no-op is just "false" — no sret to fill.
+static bool H_ApplyESRadialDamage() { return false; }
 void SetClientDamageBlock(bool on) {
     if (g_damageBlockOn == on) return;
     g_damageBlockOn = on;
     hooks::Enable("UGameplayLib::ApplyESPointDamage", on);
+    hooks::Enable("UGameplayLib::ApplyESRadialDamage", on);
     LOGF("[combat] client-side damage %s", on ? "BLOCKED (host is authoritative)" : "allowed");
 }
 
@@ -397,6 +404,9 @@ void OnInit() {
     { void* orig = nullptr;
       hooks::Install("UGameplayLib::ApplyESPointDamage", es2rva::UGameplayLib_ApplyESPointDamage, (void*)&H_ApplyESPointDamage, &orig);
       hooks::Enable("UGameplayLib::ApplyESPointDamage", false); }
+    { void* orig = nullptr;
+      hooks::Install("UGameplayLib::ApplyESRadialDamage", es2rva::UGameplayLib_ApplyESRadialDamage, (void*)&H_ApplyESRadialDamage, &orig);
+      hooks::Enable("UGameplayLib::ApplyESRadialDamage", false); }
     hooks::Install("UWeaponComponent::StartFire", es2rva::UWeaponComponent_StartFire, (void*)&H_StartFire, (void**)&o_StartFire);
     hooks::Install("UWeaponComponent::StopFire", es2rva::UWeaponComponent_StopFire, (void*)&H_StopFire, (void**)&o_StopFire);
     hooks::Install("AESPlayerController::InputStartFirePrimary", es2rva::AESPlayerController_InputStartFirePrimary, (void*)&H_StartFirePrimary, (void**)&o_StartFirePrimary);

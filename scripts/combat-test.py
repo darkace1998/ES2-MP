@@ -90,6 +90,10 @@ def main():
     con(CLIENT, f'combat route {route}')
     cw_addr = obj_prop_addr(HOST, cpawn['addr'], 'PrimaryWeapons')
     time.sleep(4)
+    # Teleporting leaves the ship pointing wherever it happened to face, so without this the client
+    # shoots into empty space and the test measures nothing. ES2's auto-aim only covers a narrow cone.
+    print('  aim:', con(CLIENT, 'aim').strip().split('\n')[0])
+    time.sleep(2)
 
     def hp_of():
         return hp_map().get(tgt['name'])

@@ -123,8 +123,12 @@ def main():
           bool(prim and int(prim.group(1)) > 0) and bool(sec and int(sec.group(1)) > 0) and empties == 0,
           f"primary={prim.group(1) if prim else '?'} secondary={sec.group(1) if sec else '?'} empty={empties}")
     lo = con(CLIENT, 'shipdata local')
-    check('client ship data filled before PostInitializeComponents', 'prePostInit=' in lo and 'prePostInit=0' not in lo,
-          [l for l in lo.split('\n') if 'prePostInit' in l][:1])
+    # The fill now happens at PreInitializeComponents (early enough for the device/consumable
+    # components, which build their slots in InitializeComponents, before PostInit). The PostInit
+    # hook remains only as a backstop, so either counter being non-zero means the ship arrived in time.
+    filled = any(f'{k}=' in lo and f'{k}=0' not in lo for k in ('prePreInit', 'prePostInit'))
+    check('client ship data filled before its components initialise', filled,
+          [l for l in lo.split('\n') if 'prePreInit' in l][:1])
 
     # --- client must not simulate damage, and must see NPCs shooting ---
     cb = con(CLIENT, 'combat')

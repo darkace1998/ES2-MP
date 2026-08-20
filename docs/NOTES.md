@@ -36,6 +36,19 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
 | Capacity | `maxplayers` (GameSession default 16; ES2 has no cap of its own) |
 
 ### Hard-won gotchas (each cost a crash or a silent failure)
+- **`ApplyESRadialDamage` was never suppressed on clients, only `ApplyESPointDamage`.** Explosive impacts
+  therefore killed the client instantly: `AProjectileBase::OnImpact -> Explode -> ApplyESRadialDamage ->
+  AWeaponBase::CheckForItemDamageChangingEffects -> AESGameModeBase::CheckForItemDamageChangingEffects_BP`
+  on a null game mode (AV reading 0x10). Both are now blocked together while a client.
+- **Component init order.** `AActor::PostActorConstruction` (0x156A448) runs `PreInitializeComponents` ->
+  `AActor::InitializeComponents()` -> `PostInitializeComponents`. Anything a *component* reads in its
+  `InitializeComponent` must exist before the FIRST of those. Filling `AESPawn::ShipData` at PostInit was
+  one step too late for `UDeviceComponent::Init` / `UConsumableComponent::InitializeComponent`, which is
+  why a client had weapons (rebuilt explicitly by the mod) but no devices or consumables.
+- **The combat authority test must aim first.** Teleporting a ship leaves it pointing wherever it was;
+  ES2's auto-aim only covers a narrow cone, so without `aim` the client shoots into space and the test
+  reports "no damage attributable" even though routing works. With `aim` it destroys the target.
+
 - **`-nullrhi` hosts crash the moment a weapon fires.** `AWeaponBase::PlayWeaponFireFX` (rva 0x12D55F8)
   calls `UGameplayStatics::SpawnEmitterAttached(MuzzleFlashParticleSystem, RootComponent, ...)` and then
   does `and byte ptr [rax+0x513], -2` on the result **without a null check**. Without an RHI that spawn
