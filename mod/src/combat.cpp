@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cmath>
 #include <map>
+#include <vector>
 #include <functional>
 #include <cstring>
 
@@ -148,6 +149,17 @@ static uint64_t g_npcFireSent = 0, g_npcFireApplied = 0, g_npcFireUnresolved = 0
 // The AI calls StartFire/StopFire far more often than the state actually changes (8000+ calls in half a
 // minute), which would swamp a reliable channel. Only transitions are sent.
 static std::map<UObject*, bool> g_npcFireState;
+// client: our local copy of a mirrored NPC's weapon component -> the aim the host reports for it.
+// Applied every tick, because the client's own SmoothedAutoaim keeps overwriting the field with a value
+// derived from an AI that is not running here.
+static std::map<UObject*, FVector> g_npcAim;
+static double g_npcAimAccum = 0;
+static float g_npcAimHz = 10.f;
+static bool g_npcAimSync = true;
+static size_t g_npcAimCursor = 0;            // round-robin so a big fight cannot flood one tick
+static uint64_t g_npcAimSent = 0, g_npcAimApplied = 0;
+static constexpr size_t kNpcAimPerTick = 6;
+
 
 static void* LocalGuidCache() {
     UNetDriver* nd = GetNetDriver(GetWorld());
@@ -208,6 +220,30 @@ void SetClientDamageBlock(bool on) {
 static void H_StartFire(UObject* wc) { o_StartFire(wc); MirrorNpcFire(wc, true); }
 static void H_StopFire(UObject* wc)  { o_StopFire(wc);  MirrorNpcFire(wc, false); }
 
+// Resolve the weapon component a mirrored message refers to: NetGUID -> our own copy of that actor ->
+// the component for that weapon category.
+static UObject* ResolveNpcWeapon(unsigned long long guid, int cat) {
+    void* cache = LocalGuidCache();
+    if (!cache) return nullptr;
+    uint64_t g = guid;
+    UObject* obj = Rva<std::remove_pointer_t<Fn_GetObjectFromNetGUID>>(es2rva::FNetGUIDCache_GetObjectFromNetGUID)(cache, &g, false);
+    if (!obj || !IsValidObject(obj)) return nullptr;
+    const char* prop = cat == 0 ? "PrimaryWeapons" : "SecondaryWeapons";
+    for (auto& p : GetProperties((UStruct*)GetClass(obj), true))
+        if (p.Name == prop) {
+            UObject* wc = UE_FIELD(UObject*, obj, p.Offset);
+            return (wc && IsValidObject(wc)) ? wc : nullptr;
+        }
+    return nullptr;
+}
+
+static bool ApplyNpcAim(const std::string& body) {
+    unsigned long long guid = 0; int cat = 0; double x = 0, y = 0, z = 0;
+    if (sscanf(body.c_str(), "%llu|%d|%lf|%lf|%lf", &guid, &cat, &x, &y, &z) != 5) return true;
+    if (UObject* wc = ResolveNpcWeapon(guid, cat)) g_npcAim[wc] = FVector{x, y, z};
+    return true;
+}
+
 static bool ApplyNpcFire(const std::string& body) {
     unsigned long long guid = 0; int cat = 0, down = 0;
     if (sscanf(body.c_str(), "%llu|%d|%d", &guid, &cat, &down) != 3) return true;
@@ -222,6 +258,7 @@ static bool ApplyNpcFire(const std::string& body) {
     for (auto& p : GetProperties((UStruct*)GetClass((UObject*)best), true))
         if (p.Name == prop) { wc = UE_FIELD(UObject*, best, p.Offset); break; }
     if (!wc || !IsValidObject(wc)) { ++g_npcFireUnresolved; return true; }
+    if (!down) g_npcAim.erase(wc);                        // stop tracking a weapon that went quiet
     if (down) o_StartFire(wc); else o_StopFire(wc);        // originals: never re-enter our own hook
     ++g_npcFireApplied;
     return true;
@@ -262,6 +299,41 @@ static void ForEachWeaponComponent(AActor* pawn, const std::function<void(UObjec
     }
 }
 
+// Host: NPC aim. Only components whose trigger is currently down are worth sending, and only a few per
+// tick — a busy fight has plenty of shooters and this shares the reliable channel with everything else.
+static void HostNpcAimTick(float dt) {
+    if (!g_npcAimSync || !g_mirrorNpcFire || players::Count() < 2) return;
+    g_npcAimAccum += dt;
+    if (g_npcAimAccum < 1.0 / g_npcAimHz) return;
+    g_npcAimAccum = 0;
+
+    // collect the live, currently-firing components (and drop dead entries while we are here)
+    std::vector<UObject*> firing;
+    for (auto it = g_npcFireState.begin(); it != g_npcFireState.end(); ) {
+        if (!it->first || !IsValidObject(it->first)) { it = g_npcFireState.erase(it); continue; }
+        if (it->second) firing.push_back(it->first);
+        ++it;
+    }
+    if (firing.empty()) { g_npcAimCursor = 0; return; }
+
+    void* cache = LocalGuidCache();
+    if (!cache) return;
+    for (size_t n = 0; n < kNpcAimPerTick && n < firing.size(); ++n) {
+        UObject* wc = firing[(g_npcAimCursor + n) % firing.size()];
+        AActor* owner = UE_FIELD(AActor*, wc, es2off::UActorComponent::OwnerPrivate);
+        if (!owner || !IsValidObject((UObject*)owner)) continue;
+        const FVector& f = UE_FIELD(FVector, wc, es2off::UWeaponComponent::FocusLocation);
+        if (!IsFinite3(f)) continue;
+        uint64_t guid = 0;
+        Rva<std::remove_pointer_t<Fn_GetNetGUID>>(es2rva::FNetGUIDCache_GetNetGUID)(cache, &guid, (const UObject*)owner);
+        if (!guid) continue;
+        int cat = (int)UE_FIELD(uint8_t, wc, es2off::UWeaponComponent::WeaponCategory);
+        coop::SendToAllClients(Format("WA|%llu|%d|%.1f|%.1f|%.1f", (unsigned long long)guid, cat, f.X, f.Y, f.Z));
+        ++g_npcAimSent;
+    }
+    g_npcAimCursor = (g_npcAimCursor + kNpcAimPerTick) % firing.size();
+}
+
 // Client: report where our own weapons are pointing.
 void ClientAimTick(float dt) {
     if (!g_aimSync || coop::CurrentRole() != coop::Role::Client) return;
@@ -285,6 +357,16 @@ void ClientAimTick(float dt) {
 
 // Host: stamp the reporting player's aim onto their server-side weapons before ES2 reads it.
 static void H_WeaponTick(UObject* comp, float dt, int tickType, void* tickFn) {
+    // Client: a mirrored NPC's aim, reported by the host. Its own AI is not running here, so without
+    // this its weapons point wherever the client's idle copy happens to face.
+    if (g_npcAimSync && comp && !g_npcAim.empty() && coop::CurrentRole() == coop::Role::Client) {
+        auto it = g_npcAim.find(comp);
+        if (it != g_npcAim.end()) {
+            UE_FIELD(FVector, comp, es2off::UWeaponComponent::FocusLocation) = it->second;
+            UE_FIELD(FVector, comp, es2off::UWeaponComponent::ClampedNonAutoAimedFocusLocation) = it->second;
+            ++g_npcAimApplied;
+        }
+    }
     if (g_aimSync && !g_aim.empty() && comp && coop::CurrentRole() == coop::Role::Host) {
         AActor* owner = UE_FIELD(AActor*, comp, es2off::UActorComponent::OwnerPrivate);
         if (owner) {
@@ -320,6 +402,7 @@ bool OnServerOp(APlayerController* from, const std::string& op, const std::strin
 
 bool OnClientOp(const std::string& op, const std::string& body) {
     if (op == "WF") return ApplyNpcFire(body);
+    if (op == "WA") return ApplyNpcAim(body);
     if (op == "HP") {
         // HP|<playerId>|<hull>|<shield>|<armor>
         // This used to skip the local player, which meant a client never saw its OWN bars move:
@@ -349,6 +432,7 @@ bool OnClientOp(const std::string& op, const std::string& body) {
 // ---------------------------------------------------------------- tick
 void Tick(float dt, bool isHost) {
     if (!isHost) return;
+    HostNpcAimTick(dt);
     g_healthAccum += dt;
     if (g_healthAccum < 1.0 / g_healthHz) return;
     g_healthAccum = 0;
@@ -417,17 +501,47 @@ static void CmdAimInfo(const console::Args& a, std::string& out) {
                       (aim && IsValidObject(aim)) ? GetName(aim).c_str() : "none");
     }
     if (out.empty()) out = "no players\n";
+
+    // `aiminfo npc` — the same question for mirrored NPCs. Keyed by NetGUID, because the same enemy is a
+    // different UObject on each machine and the GUID is the only identity both sides agree on.
+    if (a.size() > 1 && a[1] == "npc") {
+        void* cache = LocalGuidCache();
+        if (!cache) { out += "no guid cache (not in a session?)\n"; return; }
+        UClass* wcClass = FindClass("WeaponComponent");
+        int shown = 0;
+        ForEachObject([&](UObject* o) {
+            if (shown >= 40 || !wcClass || !IsA(o, wcClass)) return true;
+            AActor* owner = UE_FIELD(AActor*, o, es2off::UActorComponent::OwnerPrivate);
+            if (!owner || !IsValidObject((UObject*)owner) || players::ByPawn(owner)) return true;
+            const FVector& f = UE_FIELD(FVector, o, es2off::UWeaponComponent::FocusLocation);
+            if (!IsFinite3(f)) return true;
+            uint64_t guid = 0;
+            Rva<std::remove_pointer_t<Fn_GetNetGUID>>(es2rva::FNetGUIDCache_GetNetGUID)(cache, &guid, (const UObject*)owner);
+            if (!guid) return true;
+            // '*' marks a component whose aim we are receiving from the host, i.e. an actually
+            // mirrored shooter — those are the entries worth comparing between the two machines.
+            out += Format("  %sguid=%-8llu %-28s focus=(%.0f, %.0f, %.0f)\n",
+                          g_npcAim.count(o) ? "*" : " ", (unsigned long long)guid,
+                          GetName((UObject*)owner).c_str(), f.X, f.Y, f.Z);
+            ++shown;
+            return true;
+        });
+        if (!shown) out += "  (no mirrored NPC weapons with a valid aim here)\n";
+    }
 }
 
 static void CmdCombat(const console::Args& a, std::string& out) {
     if (a.size() > 2 && a[1] == "route") g_routeFire = a[2] == "1";
     if (a.size() > 2 && a[1] == "localfire") g_localFire = a[2] == "1";
+    if (a.size() > 2 && a[1] == "npcaim") { g_npcAimSync = a[2] == "1"; out += Format("npc aim sync %d\n", (int)g_npcAimSync); return; }
     if (a.size() > 2 && a[1] == "aimsync") { g_aimSync = a[2] == "1"; out += Format("aim sync %d\n", (int)g_aimSync); return; }
     if (a.size() > 2 && a[1] == "hphz") g_healthHz = (float)atof(a[2].c_str());
     if (a.size() > 2 && a[1] == "npcfire") g_mirrorNpcFire = a[2] == "1";
     out += Format("npcFireMirror=%d sent=%llu applied=%llu unresolved=%llu deduped=%llu\n", (int)g_mirrorNpcFire,
                   (unsigned long long)g_npcFireSent, (unsigned long long)g_npcFireApplied,
                   (unsigned long long)g_npcFireUnresolved, (unsigned long long)g_npcFireDeduped);
+    out += Format("npcAimSync=%d npcAimSent=%llu npcAimApplied=%llu npcAimTracked=%d\n",
+                  (int)g_npcAimSync, (unsigned long long)g_npcAimSent, (unsigned long long)g_npcAimApplied, (int)g_npcAim.size());
     out += Format("aimSync=%d aimSent=%llu aimApplied=%llu aimKnown=%d\n",
                   (int)g_aimSync, (unsigned long long)g_aimSent, (unsigned long long)g_aimApplied, (int)g_aim.size());
     out += Format("routeFire=%d localFire=%d healthHz=%.0f fireSent=%llu fireApplied=%llu\n",
@@ -521,7 +635,7 @@ void Register() {
     console::Register("fire", "fire [primary|secondary] [on|off] - press the local fire trigger (routes to host on a client)", CmdFire);
     console::Register("input", "input <nextprimary|prevprimary|nextsecondary|travel on/off|cruise on/off> - press a real input handler (test aid)", CmdInput);
     console::Register("combat", "combat [route 0/1|localfire 0/1|hphz N] - fire-routing status and player health", CmdCombat);
-    console::Register("aiminfo", "aiminfo - weapon FocusLocation per player (compare host vs client)", CmdAimInfo);
+    console::Register("aiminfo", "aiminfo [npc] - weapon FocusLocation per player, or per NPC keyed by NetGUID", CmdAimInfo);
     console::Register("hp", "hp [Class] - health/shield ratios of pawns in the world", CmdHp);
     console::Register("lock", "lock [playerId] - acquire closest target (host: on that player's server-side pawn)", CmdLock);
     console::Register("aim", "aim [playerId] - lock closest target and point the hull at it (test aid)", CmdAim);

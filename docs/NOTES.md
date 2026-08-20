@@ -116,9 +116,12 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
   now ~16 s (was ~29 s): ~12 s waiting on the HELLO/WELCOME handshake and ~4 s for the 54-chunk blob.
   Neither HELLO nor the loadout export needs a pawn — the export reads this process's UPlayerData —
   and both used to wait for one. The remaining ~12 s is the handshake itself, not the transfer.
-- **NPC fire is still trigger-only.** A client's own fire is now aimed accurately (its FocusLocation is
-  streamed to the host), but mirrored *NPC* fire still uses whatever the client's local copy of that NPC
-  is pointing at, and neither auto-aim target nor missile lock is synced for any shooter.
+- **Aim is synced in both directions now.** A client streams its own FocusLocation to the host (which
+  fires for it), and the host streams the FocusLocation of every *currently firing* NPC back to clients,
+  keyed by the same NetGUID the trigger mirroring uses. Only firing shooters are sent, at 10 Hz, six per
+  tick round-robin, so a busy fight cannot flood the reliable channel. Verified by matched NetGUID:
+  identical focus on both machines, bar the ~100 ms of staleness while an NPC is turning.
+  Still NOT synced for any shooter: auto-aim target and missile lock, so homing weapons can diverge.
 - **XP not yet observed firing.** The path is implemented and armed, but the harness cannot reliably make a parked ship land a kill, so no live award has been measured.
 - **Docking, stations, and mission *item* rewards** are not mirrored; `UMissionLib::AddNonItemRewards` is mapped (XP + credits + job score — it does *not* grant faction standing) but not yet hooked.
 - **Mission records that only one side has.** The client applies deltas to existing `FTaskSaveGameData` records; creating one from scratch (320 bytes with TArray/TMap members) is deliberately not attempted.
