@@ -36,6 +36,22 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
 | Capacity | `maxplayers` (GameSession default 16; ES2 has no cap of its own) |
 
 ### Hard-won gotchas (each cost a crash or a silent failure)
+- **The HUD caches the pawn; co-op replaces it.** `WG_Ingame_HUD_C` is created under the GameInstance,
+  resolves the player pawn and its weapon/device/consumable components once in `Construct`, and ES2 never
+  rebinds — single-player never swaps the player pawn. After the loadout placeholder swap (or a respawn)
+  a client's HUD reads a destroyed actor, which is what froze weapon swap, the drive charge and the
+  equipment slots. Cure is ES2's own `WG_Ingame_HUD_C::ReInit` via `PC -> MyHUD -> IngameHudWidget`;
+  `loadout::HudRebindTick` calls it on every pawn change. Do NOT re-run `Construct` — it rebuilds the
+  child slot widgets.
+- **Never measure across the loadout swap.** The client's ~25 KB blob lands ~95 s after it joins, and
+  applying it REPLACES the client's pawn and returns it to the spawn point. Both `combat-test.py` and
+  `verify.py` were sampling a weapon component belonging to the retired pawn, reporting "no damage
+  attributable" and a dead `bFireActivated` while routing was in fact fine. Both now wait for
+  `shipdata stash` to report `applied=1` first.
+- **`bFireActivated` is a bad probe.** It is only true while the weapon is mid-cycle and it hangs off a
+  pawn that may have just been replaced. Assert on the host's `combat fireApplied` counter instead —
+  it increments exactly when the host presses that player's trigger.
+
 - **`ApplyESRadialDamage` was never suppressed on clients, only `ApplyESPointDamage`.** Explosive impacts
   therefore killed the client instantly: `AProjectileBase::OnImpact -> Explode -> ApplyESRadialDamage ->
   AWeaponBase::CheckForItemDamageChangingEffects -> AESGameModeBase::CheckForItemDamageChangingEffects_BP`

@@ -58,6 +58,17 @@ def main():
     route = '1'
     if '--route' in sys.argv: route = sys.argv[sys.argv.index('--route') + 1]
 
+    # The client's ~25 KB loadout arrives well after it joins, and applying it REPLACES the client's
+    # pawn (and puts it back at the spawn point). Measuring across that swap silently invalidates the
+    # test: the weapon component sampled at the start belongs to the retired pawn, and the ship we
+    # teleported next to the target is gone. Wait for the swap before touching anything.
+    for _ in range(40):
+        if 'applied=1' in con(HOST, 'shipdata stash'): break
+        time.sleep(5)
+    else:
+        print('!! client loadout never applied — results would race the pawn swap'); return 1
+    time.sleep(5)
+
     pl = players()
     if 1 not in pl:
         print('no client player registered on the host'); return 1

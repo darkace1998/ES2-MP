@@ -55,29 +55,26 @@ def main():
         if 'player 1:' in st and 'applied=1' in st: break
         time.sleep(3); st = con(HOST, 'shipdata stash')
     check('host holds the client\'s ship loadout', 'player 1:' in st and 'applied=1' in st, st.strip().split('\n')[0])
+    # Applying the loadout replaces the client's pawn; let that settle before anything reads a pawn
+    # or one of its components, or the reads land on the actor that is about to be destroyed.
+    time.sleep(6)
 
-    # fire routing: client presses the trigger, host-side weapon component must react
-    cp = re.search(r'\[1\].*pawn=(\S+)', pl)
-    fired = False
-    if cp:
-        acts = con(HOST, 'actors ESPawn 60')
-        addr = None
-        for line in acts.split('\n'):
-            m = re.match(r'([0-9A-F]{8,16})\s+\S+\s+(\S+)', line)
-            if m and m.group(2).endswith(cp.group(1)): addr = m.group(1); break
-        if addr:
-            pw = re.search(r'([0-9A-F]{16})\s*$', con(HOST, f'props 0x{addr} PrimaryWeapons'), re.M)
-            if pw:
-                w = pw.group(1)
-                before = 'true' in con(HOST, f'props 0x{w} bFireActivated')
-                con(CLIENT, 'fire primary on')
-                time.sleep(1.5)
-                during = 'true' in con(HOST, f'props 0x{w} bFireActivated')
-                con(CLIENT, 'fire primary off')
-                time.sleep(1)
-                after = 'true' in con(HOST, f'props 0x{w} bFireActivated')
-                fired = (not before) and during and (not after)
-    check('client fire drives the host-side weapon', fired)
+    # Fire routing. Sampling the host-side weapon's bFireActivated turned out to be a poor probe: it
+    # is only true while the weapon is mid-cycle, and it reads off a pawn the loadout swap or a
+    # respawn may have just replaced. The robust signal is the host's own counter — combat::fireApplied
+    # increments exactly when the host presses the trigger on that player's server-side controller,
+    # which is precisely what "the client's fire drives the host" means.
+    # combat-test.py is the deeper end-to-end check (it destroys a real enemy).
+    def host_applied():
+        m = re.search(r'fireApplied=(\d+)', con(HOST, 'combat'))
+        return int(m.group(1)) if m else -1
+    a0 = host_applied()
+    con(CLIENT, 'fire primary on')
+    time.sleep(1.5)
+    con(CLIENT, 'fire primary off')
+    time.sleep(1)
+    a1 = host_applied()
+    check('client fire drives the host-side weapon', a1 > a0, f'host fireApplied {a0} -> {a1}')
 
     # --- shared world state ---
     ws_h, ws_c = con(HOST, 'world'), con(CLIENT, 'world')
@@ -129,6 +126,41 @@ def main():
     filled = any(f'{k}=' in lo and f'{k}=0' not in lo for k in ('prePreInit', 'prePostInit'))
     check('client ship data filled before its components initialise', filled,
           [l for l in lo.split('\n') if 'prePreInit' in l][:1])
+
+    # ES2's ingame HUD widget lives under the GameInstance and caches the pawn at construction, so it
+    # survives the loadout pawn swap and then reads a destroyed actor — that is what froze weapon
+    # swap, the drive charge and the equipment slots on a client. HudRebindTick must keep it current.
+    cst = con(CLIENT, 'status')
+    live = re.search(r'^pawn=\S+ (\S+) \((\w+)\)', cst, re.M)
+    hud_addr = None
+    for line in con(CLIENT, 'find WG_Ingame_HUD_C 8').split('\n'):
+        if 'BP_GameInstance' in line:
+            m = re.match(r'([0-9A-F]{12,16})', line.strip())
+            if m: hud_addr = m.group(1); break
+    bound = None
+    if hud_addr:
+        m = re.search(r'PlayerPawn\s+\S+\s+=\s+\S+\s+(\S+)\s+([0-9A-F]{12,16})',
+                      con(CLIENT, f'props 0x{hud_addr} PlayerPawn'))
+        if m: bound = m.group(2)
+    check("client HUD is bound to the pawn it is actually flying",
+          bool(live and bound) and bound.lstrip('0').lower() == live.group(2).lstrip('0').lower(),
+          f'hud={bound} live={live.group(2) if live else "?"}')
+
+    # A weapon swap must move UWeaponComponent::EquippedSlotIndex on the client.
+    def equipped():
+        m = re.search(r'PrimaryWeapons: \d+ slot\(s\), equipped=(\d+)', con(CLIENT, 'shipdata weapons'))
+        return m.group(1) if m else None
+    # A swap is briefly refused right after a respawn (ES2 blocks the next-weapon action until the
+    # ship is ready again), so retry rather than sample once.
+    before = after = None
+    for _ in range(4):
+        before = equipped()
+        con(CLIENT, 'input nextprimary')
+        time.sleep(3)
+        after = equipped()
+        if before and after and before != after: break
+    check('client weapon swap changes the equipped slot', bool(before and after and before != after),
+          f'{before} -> {after}')
 
     # --- client must not simulate damage, and must see NPCs shooting ---
     cb = con(CLIENT, 'combat')
