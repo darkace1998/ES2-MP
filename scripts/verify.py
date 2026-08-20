@@ -48,7 +48,12 @@ def main():
     ti = con(HOST, 'travelinfo')
     check('world origin shifting disabled', 'worldOriginShiftingStack=0' in ti and 'bUseWorldOriginShifting=0' in ti)
 
+    # The client streams its ~25 KB ship loadout to the host in ~54 reliable-RPC chunks; on a fresh
+    # connect that can take up to a minute to arrive and apply, so poll rather than sample once.
     st = con(HOST, 'shipdata stash')
+    for _ in range(30):
+        if 'player 1:' in st and 'applied=1' in st: break
+        time.sleep(3); st = con(HOST, 'shipdata stash')
     check('host holds the client\'s ship loadout', 'player 1:' in st and 'applied=1' in st, st.strip().split('\n')[0])
 
     # fire routing: client presses the trigger, host-side weapon component must react
