@@ -36,6 +36,21 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
 | Capacity | `maxplayers` (GameSession default 16; ES2 has no cap of its own) |
 
 ### Hard-won gotchas (each cost a crash or a silent failure)
+- **Correct for desync, never aim FOR the player.** The first version of the aim fix replaced the
+  client's focus point with the host's copy of the target's position. That hits — and turns every shot
+  into a guided one: you could fire well beside an enemy and still kill it. The client now also reports
+  where IT sees that target, and the host shifts the player's own aim point by the difference. Aiming
+  dead-on hits; aiming beside it misses by exactly as much as the player missed by.
+- **ES2 replicates no hitpoint state, so enemies look untouched on a client.** The host reports each
+  NPC's hull/shield/armour, but only when it changes (a fight is then a handful of messages, not a stream
+  per enemy). Applied through `SetCurrentHitpointsWithRatio` like the player values, so the bars move.
+- **An NPC dying is invisible on a client** — the host runs the death Blueprint that spawns the
+  explosion, the client just has the actor replicated away, so enemies blink out. The host announces the
+  death as the hull reaches zero, deliberately BEFORE the actor is destroyed so the client can still
+  resolve the NetGUID, and the client calls `Die` on its own copy. `Die` is a BlueprintNativeEvent whose
+  Blueprint half carries the FX, and calling it client-side was verified not to hit the null-GameMode
+  crash path.
+
 - **NPC proxies are driven from `AActor::ReplicatedMovement`, not left to local physics.** They replicate
   with bRepPhysics, so a client integrates their physics between updates and lurches on every correction.
   Three things did NOT work: raising `NetServerMaxTickRate` from 30 (no effect; bandwidth was never the

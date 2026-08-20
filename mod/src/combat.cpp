@@ -185,7 +185,9 @@ static void H_TickRegeneration(UObject* comp, AActor* a, UObject* core, float f1
 }
 
 static bool g_aimAtTarget = true;   // host: aim at its own copy of the target, not the client's point
-static uint64_t g_aimRetargeted = 0;      // mirror the locked target as well as the aim point
+static uint64_t g_aimRetargeted = 0;
+static std::map<int, uint64_t> g_playerTargetGuid;   // what the player is aiming at
+static std::map<int, FVector> g_playerTargetSeen;   // and where the CLIENT sees it      // mirror the locked target as well as the aim point
 static size_t g_npcAimCursor = 0;            // round-robin so a big fight cannot flood one tick
 static uint64_t g_npcAimSent = 0, g_npcAimApplied = 0;
 static constexpr size_t kNpcAimPerTick = 4;
@@ -498,16 +500,27 @@ void ClientAimTick(float dt) {
     // Carry the locked target per weapon category as well: missiles home on it, and on the host our
     // weapon component has no player to have locked anything.
     uint64_t lock[2] = {0, 0}, aa[2] = {0, 0};
+    AActor* primary = nullptr;
     ForEachWeaponComponent(pawn, [&](UObject* wc) {
         int cat = (int)UE_FIELD(uint8_t, wc, es2off::UWeaponComponent::WeaponCategory);
         if (cat < 0 || cat > 1) return;
-        if (AActor* t = GetLock(wc)) lock[cat] = NetGuidOf((const UObject*)t);
+        AActor* lt = GetLock(wc);
+        if (lt) lock[cat] = NetGuidOf((const UObject*)lt);
         AActor* a = UE_FIELD(AActor*, wc, es2off::UWeaponComponent::CurrentAutoAimTarget);
         if (a && IsValidObject((UObject*)a)) aa[cat] = NetGuidOf((const UObject*)a);
+        if (!primary) primary = a ? a : lt;
     });
-    coop::SendToServer(Format("AIM|%.1f|%.1f|%.1f|%llu|%llu|%llu|%llu", focus.X, focus.Y, focus.Z,
+    // Send where WE see that target too. The host cannot correct for the position desync without it,
+    // and correcting by snapping onto its own copy (which is what this used to do) turned every shot
+    // into a guided one — you could fire well beside an enemy and still hit.
+    uint64_t tguid = primary ? NetGuidOf((const UObject*)primary) : 0;
+    FVector tpos{};
+    if (primary) tpos = GetActorTransform(primary).Translation;
+    coop::SendToServer(Format("AIM|%.1f|%.1f|%.1f|%llu|%llu|%llu|%llu|%llu|%.1f|%.1f|%.1f",
+                              focus.X, focus.Y, focus.Z,
                               (unsigned long long)lock[0], (unsigned long long)lock[1],
-                              (unsigned long long)aa[0], (unsigned long long)aa[1]));
+                              (unsigned long long)aa[0], (unsigned long long)aa[1],
+                              (unsigned long long)tguid, tpos.X, tpos.Y, tpos.Z));
     ++g_aimSent;
 }
 
@@ -544,13 +557,19 @@ static void H_WeaponTick(UObject* comp, float dt, int tickType, void* tickFn) {
                     // the reported point is only the fallback for aiming at empty space.
                     FVector focus = it->second;
                     if (g_aimAtTarget && cat0 >= 0 && cat0 <= 1) {
-                        uint64_t tg = 0;
-                        auto aa2 = g_playerAutoAim.find(p->id);
-                        if (aa2 != g_playerAutoAim.end()) tg = aa2->second[cat0];
-                        if (!tg) { auto lk2 = g_playerLock.find(p->id); if (lk2 != g_playerLock.end()) tg = lk2->second[cat0]; }
-                        if (tg) {
-                            if (AActor* t = ActorFromNetGuid(tg)) {
-                                focus = GetActorTransform(t).Translation;
+                        auto tgIt = g_playerTargetGuid.find(p->id);
+                        auto seenIt = g_playerTargetSeen.find(p->id);
+                        if (tgIt != g_playerTargetGuid.end() && tgIt->second &&
+                            seenIt != g_playerTargetSeen.end()) {
+                            if (AActor* t = ActorFromNetGuid(tgIt->second)) {
+                                // Shift the player's own aim by however far this target has drifted
+                                // between the two machines. Aiming dead-on still hits; aiming beside it
+                                // still misses by exactly as much as the player missed by.
+                                FVector here = GetActorTransform(t).Translation;
+                                const FVector& there = seenIt->second;
+                                focus = FVector{ focus.X + (here.X - there.X),
+                                                 focus.Y + (here.Y - there.Y),
+                                                 focus.Z + (here.Z - there.Z) };
                                 ++g_aimRetargeted;
                             }
                         }
@@ -649,17 +668,111 @@ void NpcFollowTick(float dt) {
     if (g_npcTargets.size() > 512) g_npcTargets.clear();
 }
 
+// ---------------------------------------------------------------- NPC hitpoints
+//
+// ES2 replicates no hitpoint state at all, so a client's copy of every enemy sits at full health however
+// hard the host is hammering it — no bars moving, no damage read-out, nothing to show a fight is going
+// the player's way. The host therefore reports each NPC's hull/shield/armour, but only when it actually
+// changes, which keeps a busy fight down to a handful of messages instead of a stream per enemy.
+static bool g_npcHpSync = true;
+static double g_npcHpAccum = 0;
+static float g_npcHpHz = 8.f;
+static constexpr size_t kNpcHpPerTick = 8;
+static uint64_t g_npcHpSent = 0, g_npcHpApplied = 0;
+static uint64_t g_npcDeathsSent = 0, g_npcDeathsPlayed = 0;
+static bool g_npcDeathFx = true;
+// An NPC dying is invisible on a client: the host runs the death Blueprint (which is what spawns the
+// explosion) and the client merely has the actor replicated away, so enemies just blink out. The host
+// announces the death as the hull reaches zero — deliberately BEFORE the actor is destroyed, while the
+// client can still resolve the NetGUID — and the client plays its own copy's Die, which is a
+// BlueprintNativeEvent whose Blueprint half carries the FX. Verified safe to call client-side.
+struct NpcHp { float hull = -1, shield = -1, armor = -1; bool announcedDead = false; };
+static std::map<AActor*, NpcHp> g_npcHpLast;
+static std::vector<AActor*> g_hostNpcCache;
+static double g_hostNpcCacheAge = 0;
+
+static void HostNpcHpTick(float dt) {
+    if (!g_npcHpSync || players::Count() < 2) return;
+    g_npcHpAccum += dt;
+    if (g_npcHpAccum < 1.0 / g_npcHpHz) return;
+    g_npcHpAccum = 0;
+
+    g_hostNpcCacheAge -= 1.0 / g_npcHpHz;
+    if (g_hostNpcCacheAge <= 0) {
+        g_hostNpcCacheAge = 1.0;
+        UClass* pawnClass = FindClass("ESPawn");
+        g_hostNpcCache.clear();
+        if (pawnClass)
+            for (AActor* a : GetAllActorsOfClass(GetWorld(), pawnClass))
+                if (a && !players::ByPawn(a)) g_hostNpcCache.push_back(a);
+    }
+
+    size_t sent = 0;
+    for (AActor* act : g_hostNpcCache) {
+        if (sent >= kNpcHpPerTick) break;
+        if (!act || !IsValidObject((UObject*)act)) continue;
+        float hull = GetHealthRatio(act);
+        if (hull < 0) continue;
+        float shield = GetShieldRatio(act), armor = GetArmorRatio(act);
+        NpcHp& last = g_npcHpLast[act];
+        auto same = [](float a, float b) { return fabsf(a - b) < 0.002f; };
+        if (same(hull, last.hull) && same(shield, last.shield) && same(armor, last.armor)) continue;
+        uint64_t guid = NetGuidOf((const UObject*)act);
+        if (!guid) continue;
+        bool wasDead = last.announcedDead;
+        last = NpcHp{hull, shield, armor, wasDead};
+        if (hull <= 0.001f && !last.announcedDead) {
+            last.announcedDead = true;
+            uint64_t dg = NetGuidOf((const UObject*)act);
+            if (dg) { coop::SendToAllClients(Format("ND|%llu", (unsigned long long)dg)); ++g_npcDeathsSent; }
+        }
+        coop::SendToAllClients(Format("NH|%llu|%.3f|%.3f|%.3f", (unsigned long long)guid, hull, shield, armor));
+        ++g_npcHpSent;
+        ++sent;
+    }
+    if (g_npcHpLast.size() > 512) g_npcHpLast.clear();
+}
+
+// Play the death Blueprint on our own copy so the player sees the enemy blow up rather than vanish.
+static bool ApplyNpcDeath(const std::string& body) {
+    if (!g_npcDeathFx) return true;
+    unsigned long long guid = 0;
+    if (sscanf(body.c_str(), "%llu", &guid) != 1) return true;
+    AActor* act = ActorFromNetGuid(guid);
+    if (!act || !IsValidObject((UObject*)act)) return true;
+    if (UFunction* fn = FindFunction((UObject*)act, "Die")) {
+        ProcessEvent((UObject*)act, fn, nullptr);
+        ++g_npcDeathsPlayed;
+    }
+    return true;
+}
+
+static bool ApplyNpcHp(const std::string& body) {
+    unsigned long long guid = 0; float hull = -1, shield = -1, armor = -1;
+    if (sscanf(body.c_str(), "%llu|%f|%f|%f", &guid, &hull, &shield, &armor) < 2) return true;
+    AActor* act = ActorFromNetGuid(guid);
+    if (!act) return true;
+    ApplyRatio(act, "HealthComponent", hull);
+    ApplyRatio(act, "ShieldComponent", shield);
+    ApplyRatio(act, "ArmorComponent", armor);
+    ++g_npcHpApplied;
+    return true;
+}
+
 // ---------------------------------------------------------------- messages
 bool OnServerOp(APlayerController* from, const std::string& op, const std::string& body) {
     if (op == "AIM") {
-        double x = 0, y = 0, z = 0; unsigned long long l0 = 0, l1 = 0, a0 = 0, a1 = 0;
-        int n = sscanf(body.c_str(), "%lf|%lf|%lf|%llu|%llu|%llu|%llu", &x, &y, &z, &l0, &l1, &a0, &a1);
+        double x = 0, y = 0, z = 0, tx = 0, ty = 0, tz = 0;
+        unsigned long long l0 = 0, l1 = 0, a0 = 0, a1 = 0, tg = 0;
+        int n = sscanf(body.c_str(), "%lf|%lf|%lf|%llu|%llu|%llu|%llu|%llu|%lf|%lf|%lf",
+                       &x, &y, &z, &l0, &l1, &a0, &a1, &tg, &tx, &ty, &tz);
         if (n < 3) return true;
         players::Player* p = players::ByController(from);
         if (!p) return true;
         g_aim[p->id] = FVector{x, y, z};
         if (n >= 7) g_playerAutoAim[p->id] = {a0, a1};
         if (n >= 5) g_playerLock[p->id] = {l0, l1};   // stamped per tick, see ApplyLock
+        if (n >= 11) { g_playerTargetGuid[p->id] = tg; g_playerTargetSeen[p->id] = FVector{tx, ty, tz}; }
         return true;
     }
     if (op == "F") {
@@ -674,6 +787,8 @@ bool OnServerOp(APlayerController* from, const std::string& op, const std::strin
 bool OnClientOp(const std::string& op, const std::string& body) {
     if (op == "WF") return ApplyNpcFire(body);
     if (op == "WA") return ApplyNpcAim(body);
+    if (op == "NH") return ApplyNpcHp(body);
+    if (op == "ND") return ApplyNpcDeath(body);
     if (op == "HP") {
         // HP|<playerId>|<hull>|<shield>|<armor>
         // This used to skip the local player, which meant a client never saw its OWN bars move:
@@ -704,6 +819,7 @@ bool OnClientOp(const std::string& op, const std::string& body) {
 void Tick(float dt, bool isHost) {
     if (!isHost) return;
     HostNpcAimTick(dt);
+    HostNpcHpTick(dt);
     g_healthAccum += dt;
     if (g_healthAccum < 1.0 / g_healthHz) return;
     g_healthAccum = 0;
@@ -956,6 +1072,8 @@ static void CmdAimInfo(const console::Args& a, std::string& out) {
 static void CmdCombat(const console::Args& a, std::string& out) {
     if (a.size() > 2 && a[1] == "route") g_routeFire = a[2] == "1";
     if (a.size() > 2 && a[1] == "localfire") g_localFire = a[2] == "1";
+    if (a.size() > 2 && a[1] == "deathfx") { g_npcDeathFx = a[2] == "1"; out += Format("npc death fx %d\n", (int)g_npcDeathFx); return; }
+    if (a.size() > 2 && a[1] == "npchp") { g_npcHpSync = a[2] == "1"; out += Format("npc hp sync %d\n", (int)g_npcHpSync); return; }
     if (a.size() > 2 && a[1] == "npcfollow") { g_npcFollow = a[2] == "1"; out += Format("npc follow %d\n", (int)g_npcFollow); return; }
     if (a.size() > 2 && a[1] == "followrate") { g_npcFollowRate = (float)atof(a[2].c_str()); out += Format("rate %.1f\n", g_npcFollowRate); return; }
     if (a.size() > 2 && a[1] == "clientregen") { g_blockClientRegen = a[2] == "0"; out += Format("client regen blocked %d\n", (int)g_blockClientRegen); return; }
@@ -974,6 +1092,10 @@ static void CmdCombat(const console::Args& a, std::string& out) {
                   (unsigned long long)g_lockApplied, (unsigned long long)g_guidScans);
     out += Format("npcAimSync=%d npcAimSent=%llu npcAimApplied=%llu npcAimTracked=%d\n",
                   (int)g_npcAimSync, (unsigned long long)g_npcAimSent, (unsigned long long)g_npcAimApplied, (int)g_npcAim.size());
+    out += Format("npcDeathFx=%d deathsSent=%llu deathsPlayed=%llu\n", (int)g_npcDeathFx,
+                  (unsigned long long)g_npcDeathsSent, (unsigned long long)g_npcDeathsPlayed);
+    out += Format("npcHpSync=%d npcHpSent=%llu npcHpApplied=%llu\n", (int)g_npcHpSync,
+                  (unsigned long long)g_npcHpSent, (unsigned long long)g_npcHpApplied);
     out += Format("npcFollow=%d rate=%.1f followed=%llu snaps=%llu tracked=%d\n", (int)g_npcFollow,
                   g_npcFollowRate, (unsigned long long)g_npcFollowed, (unsigned long long)g_npcFollowSnaps,
                   (int)g_npcCache.size());
