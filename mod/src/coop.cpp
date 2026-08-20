@@ -383,6 +383,7 @@ static void Tick(float dt) {
     if (r == Role::None) return;
     players::Refresh();
     loadout::HudRebindTick();   // the HUD caches the pawn; it must follow every pawn swap
+    loadout::CrosshairCategoryTick(dt);   // clients never get ES2's SetWeaponCategory call
     if (r == Role::Host) {
         g_sweepAccum += dt;
         if (g_sweepAccum > 0.5) { g_sweepAccum = 0; RelevancySweep(); }

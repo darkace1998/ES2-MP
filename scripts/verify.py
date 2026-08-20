@@ -198,10 +198,18 @@ def main():
         print(f'INFO  target lock: client guid={cg} host guid={hg}'
               + (f' — target {d:.0f} u away, beyond a realistic lock' if d else ' — nothing in lock range here'))
 
-    # A weapon swap must move UWeaponComponent::EquippedSlotIndex on the client.
+    # A weapon swap must move UWeaponComponent::EquippedSlotIndex on the client...
     def equipped():
         m = re.search(r'PrimaryWeapons: \d+ slot\(s\), equipped=(\d+)', con(CLIENT, 'shipdata weapons'))
         return m.group(1) if m else None
+    # ...and the reticle must follow it. Those are two separate legs: the switch itself always worked on
+    # the client, but ES2 only calls the crosshair's SetWeaponCategory on the host, so the client used to
+    # keep the previous weapon's reticle. Sampling both catches a regression in either one.
+    def reticle():
+        out = con(CLIENT, 'reticle')          # one sample: the two values must agree at the same instant
+        cur = re.search(r'cur=(cat_\w+)', out)
+        want = re.search(r'GetSubCategoryID ok=1 -> (cat_\w+)', out)
+        return (cur.group(1) if cur else None), (want.group(1) if want else None)
     # A swap is briefly refused right after a respawn (ES2 blocks the next-weapon action until the
     # ship is ready again), so retry rather than sample once.
     before = after = None
@@ -213,6 +221,9 @@ def main():
         if before and after and before != after: break
     check('client weapon swap changes the equipped slot', bool(before and after and before != after),
           f'{before} -> {after}')
+    shown, want = reticle()
+    check("client's reticle matches the equipped weapon", bool(want and shown == want),
+          f'crosshair shows {shown}, equipped weapon is {want}')
 
     # --- client must not simulate damage, and must see NPCs shooting ---
     cb = con(CLIENT, 'combat')

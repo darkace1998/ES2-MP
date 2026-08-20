@@ -496,9 +496,41 @@ using Fn_UnPossess = void (*)(void* controller);
 // device/consumable slots all stop updating while the underlying state moves normally.
 //
 // ES2 already ships the cure: WG_Ingame_HUD_C::ReInit, reachable as PC -> MyHUD -> IngameHudWidget.
-// Calling the game's own function re-resolves everything the widget cached, which is far safer than
-// re-running Construct (that would rebuild child slot widgets). The widget property is looked up by
-// reflection rather than a fixed offset so this keeps working across HUD Blueprint variants.
+
+// ReInit re-resolves what the top-level HUD widget caches, but its children bind the pawn's components
+// in their own Construct and ReInit does not cascade into them. After a pawn swap the crosshair
+// (WG_Crosshair_C::PlayerWeaponComponent) and the equipment bar (WG_HUD_Equipment_C::WeaponComponent)
+// still point at the RETIRED pawn's components, so a weapon switch fires OnWeaponSwitched on a component
+// nothing on screen listens to and the reticle never changes shape. Re-running Construct on just those
+// children rebinds the pointers and re-subscribes their delegates; children already correct are skipped,
+// and this only runs on a pawn change, so no widget is reconstructed on a normal frame.
+static void RebindStaleChildWidgets(UObject* widget, AActor* pawn) {
+    UClass* compCls = FindClass("ActorComponent");
+    if (!compCls) return;
+    for (auto& p : GetProperties((UStruct*)GetClass(widget), true)) {
+        if (p.TypeName != "ObjectProperty") continue;
+        UObject* child = UE_FIELD(UObject*, widget, p.Offset);
+        if (!child || !IsValidObject(child)) continue;
+        UFunction* ctor = FindFunction(child, "Construct");
+        if (!ctor) continue;                       // no init graph of its own -- nothing to redo
+        bool stale = false;
+        for (auto& q : GetProperties((UStruct*)GetClass(child), true)) {
+            if (q.TypeName != "ObjectProperty") continue;
+            UObject* v = UE_FIELD(UObject*, child, q.Offset);
+            if (!v || !IsValidObject(v) || !IsA(v, compCls)) continue;
+            AActor* owner = UE_FIELD(AActor*, v, es2off::UActorComponent::OwnerPrivate);
+            if (owner && owner != pawn) { stale = true; break; }
+        }
+        if (!stale) continue;
+        ProcessEvent(child, ctor, nullptr);
+        LOGF("[loadout] re-Construct %s (held a component from a retired pawn)", GetName(child).c_str());
+    }
+}
+
+// Calling the game's own function re-resolves everything the TOP-LEVEL widget cached. Its children
+// keep their own cached component pointers and ReInit does not reach them, so RebindStaleChildWidgets
+// above finishes the job. The widget property is looked up by reflection rather than a fixed offset so
+// this keeps working across HUD Blueprint variants.
 // Runs for host and client alike: the host's pawn is swapped on respawn too.
 static AActor* g_lastHudPawn = nullptr;
 void HudRebindTick() {
@@ -519,7 +551,106 @@ void HudRebindTick() {
     if (!fn) return;
     g_lastHudPawn = pawn;
     ProcessEvent(widget, fn, nullptr);
+    RebindStaleChildWidgets(widget, pawn);
     LOGF("[loadout] HUD rebound to %s", GetName((UObject*)pawn).c_str());
+}
+
+// ---------------------------------------------------------------- crosshair reticle
+// ES2 keeps the reticle's shape in WG_Crosshair_C::WeaponCategory -- an item sub-category id such as
+// cat_coil_gun -- and changes it by calling that widget's SetWeaponCategory when the player switches
+// weapon. On a client that call never arrives. Everything upstream of it works: the weapon component's
+// EquippedSlotIndex moves and the HUD's slot highlight follows, so the client ends up firing a thermo
+// gun with a coil gun's reticle still on screen. Push the value ourselves from whatever is equipped,
+// which also repairs the mismatch a client starts with after its ship is rebuilt locally.
+
+// PC -> MyHUD -> IngameHudWidget -> Crosshair, plus the two fields we need off it.
+struct CrosshairRef {
+    UObject* widget = nullptr;      // WG_Crosshair_C
+    UObject* weaponComp = nullptr;  // its cached PlayerWeaponComponent
+    uint32_t catOff = 0;            // offset of its WeaponCategory FName
+    explicit operator bool() const { return widget && weaponComp && catOff; }
+};
+
+static CrosshairRef FindCrosshair() {
+    CrosshairRef r;
+    UWorld* w = GetWorld();
+    APlayerController* pc = w ? GetFirstLocalPlayerController(w) : nullptr;
+    UObject* hud = pc ? UE_FIELD(UObject*, pc, es2off::APlayerController::MyHUD) : nullptr;
+    if (!hud || !IsValidObject(hud)) return r;
+    UObject* root = nullptr;
+    for (auto& p : GetProperties((UStruct*)GetClass(hud), true))
+        if (p.Name == "IngameHudWidget" && p.TypeName == "ObjectProperty") { root = UE_FIELD(UObject*, hud, p.Offset); break; }
+    if (!root || !IsValidObject(root)) return r;
+    for (auto& p : GetProperties((UStruct*)GetClass(root), true))
+        if (p.Name == "Crosshair" && p.TypeName == "ObjectProperty") { r.widget = UE_FIELD(UObject*, root, p.Offset); break; }
+    if (!r.widget || !IsValidObject(r.widget)) { r.widget = nullptr; return r; }
+    for (auto& p : GetProperties((UStruct*)GetClass(r.widget), true)) {
+        if (p.Name == "PlayerWeaponComponent" && p.TypeName == "ObjectProperty") r.weaponComp = UE_FIELD(UObject*, r.widget, p.Offset);
+        else if (p.Name == "WeaponCategory" && p.TypeName == "NameProperty") r.catOff = p.Offset;
+    }
+    return r;
+}
+
+// Read an FName out of a UFunction, or pass one in. ES2 exposes both halves we need this way:
+// UItem::GetSubCategoryID returns the id, WG_Crosshair_C::SetWeaponCategory consumes it.
+static bool CallNameFn(UObject* obj, const char* fnName, FName* inOut, bool isSetter) {
+    UFunction* fn = obj ? FindFunction(obj, fnName) : nullptr;
+    if (!fn) return false;
+    std::vector<char> parms(UE_FIELD(uint16_t, fn, es2off::UFunction::ParmsSize) + 16, 0);
+    for (auto& p : GetProperties((UStruct*)fn, false)) {
+        const bool isReturn = (p.Flags & 0x400 /*CPF_ReturnParm*/) != 0;
+        if (isSetter == isReturn || p.TypeName != "NameProperty") continue;
+        if (isSetter) *(FName*)(parms.data() + p.Offset) = *inOut;
+        ProcessEvent(obj, fn, parms.data());
+        if (!isSetter) *inOut = *(FName*)(parms.data() + p.Offset);
+        return true;
+    }
+    return false;
+}
+
+// The UItem equipped in a weapon component's active slot, or null.
+static UObject* EquippedItem(UObject* wc) {
+    if (!wc || !IsValidObject(wc)) return nullptr;
+    struct RawArray { char* Data; int32_t Num; int32_t Max; };
+    RawArray& slots = UE_FIELD(RawArray, wc, es2off::UWeaponComponent::WeaponSlots);
+    int32_t idx = UE_FIELD(int32_t, wc, es2off::UWeaponComponent::EquippedSlotIndex);
+    if (idx < 0 || idx >= slots.Num || !slots.Data) return nullptr;
+    UObject* item = *(UObject**)(slots.Data + (size_t)idx * es2off::FWeaponInfo::__size
+                                            + es2off::FWeaponInfo::WeaponItem);
+    return (item && IsValidObject(item)) ? item : nullptr;
+}
+
+static double g_reticleNext = 0;
+void CrosshairCategoryTick(float dt) {
+    if (coop::CurrentRole() != coop::Role::Client) return;   // only the client misses ES2's own call
+    g_reticleNext -= dt;
+    if (g_reticleNext > 0) return;
+    g_reticleNext = 0.2;                                     // 5 Hz is well under a human weapon swap
+    CrosshairRef c = FindCrosshair();
+    if (!c) return;
+    UObject* item = EquippedItem(c.weaponComp);
+    if (!item) return;
+    FName want{};
+    if (!CallNameFn(item, "GetSubCategoryID", &want, false) || want.IsNone()) return;
+    if (UE_FIELD(FName, c.widget, c.catOff) == want) return; // already right: no call, no churn
+    CallNameFn(c.widget, "SetWeaponCategory", &want, true);
+    LOGF("[loadout] reticle -> %s", want.ToString().c_str());
+}
+
+// Reports each stage of the lookup above, so a silent bail-out can be located.
+static void CmdReticle(const console::Args&, std::string& out) {
+    out += Format("role=%d (client=%d)\n", (int)coop::CurrentRole(), (int)coop::Role::Client);
+    CrosshairRef c = FindCrosshair();
+    out += Format("crosshair=%p weaponComp=%p catOff=0x%X cur=%s\n", (void*)c.widget, (void*)c.weaponComp,
+                  c.catOff, c.catOff ? UE_FIELD(FName, c.widget, c.catOff).ToString().c_str() : "?");
+    if (!c) return;
+    out += Format("equippedSlotIndex=%d\n", UE_FIELD(int32_t, c.weaponComp, es2off::UWeaponComponent::EquippedSlotIndex));
+    UObject* item = EquippedItem(c.weaponComp);
+    out += Format("item=%p %s\n", (void*)item, item ? GetFullName(item).c_str() : "");
+    if (!item) return;
+    FName want{};
+    bool ok = CallNameFn(item, "GetSubCategoryID", &want, false);
+    out += Format("GetSubCategoryID ok=%d -> %s\n", (int)ok, want.ToString().c_str());
 }
 
 void HostTick(float dt) {
@@ -737,6 +868,7 @@ static void CmdShipData(const console::Args& a, std::string& out) {
 }
 
 void Register() {
+    console::Register("reticle", "reticle - why the client's reticle is or is not updating", CmdReticle);
     console::Register("shipdata", "shipdata [info|export|send|stash|apply <id>|weapons|devices|local|on|off] - per-player ship loadout", CmdShipData);
     console::Register("ships", "ships [index] - list the ships this player owns / pick the one to fly", CmdShips);
 }

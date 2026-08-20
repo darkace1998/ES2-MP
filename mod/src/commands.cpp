@@ -70,6 +70,12 @@ void CmdExec(const console::Args& a, std::string& out) {
 void CmdObjects(const console::Args& a, std::string& out) {
     if (a.size() < 2) { out = "usage: objects <Class> [max=50] [filter]\n"; return; }
     UClass* c = FindClass(a[1]);
+    // Blueprint classes (WG_Crosshair_C and friends) are not in the native class registry, so also
+    // accept an instance -- "class 0xADDR" then reports that instance's class.
+    if (!c) {
+        std::string err;
+        if (UObject* o = ResolveObject(a[1], err)) c = GetClass(o);
+    }
     if (!c) { out = "class not found: " + a[1] + "\n"; return; }
     int max = a.size() > 2 ? atoi(a[2].c_str()) : 50;
     std::string filter = a.size() > 3 ? a[3] : "";
@@ -103,6 +109,12 @@ void CmdActors(const console::Args& a, std::string& out) {
 void CmdClass(const console::Args& a, std::string& out) {
     if (a.size() < 2) { out = "usage: class <Class>\n"; return; }
     UClass* c = FindClass(a[1]);
+    // Blueprint classes (WG_Crosshair_C and friends) are not in the native class registry, so also
+    // accept an instance -- "class 0xADDR" then reports that instance's class.
+    if (!c) {
+        std::string err;
+        if (UObject* o = ResolveObject(a[1], err)) c = GetClass(o);
+    }
     if (!c) { out = "class not found: " + a[1] + "\n"; return; }
     out += "chain:";
     for (UClass* k = c; k; k = GetSuperClass(k)) out += " " + GetName((UObject*)k);
@@ -114,6 +126,50 @@ void CmdClass(const console::Args& a, std::string& out) {
     for (UClass* k = c; k; k = GetSuperClass(k)) {
         for (UObject* f = UE_FIELD(UObject*, k, es2off::UStruct::Children); f; f = UE_FIELD(UObject*, f, 0x28 /*UField::Next*/)) {
             out += Format("  %s::%s flags=0x%X parms=%d\n", GetName((UObject*)k).c_str(), GetName(f).c_str(), UE_FIELD(uint32_t, f, es2off::UFunction::FunctionFlags), (int)UE_FIELD(uint8_t, f, es2off::UFunction::NumParms));
+        }
+    }
+}
+
+
+// Raw memory read. Needed for native C++ members that have no UProperty and so never show up in
+// `props` -- FWeaponInfo's spawned-instance array, for instance, which is what gates weapon switching.
+void CmdPeek(const console::Args& a, std::string& out) {
+    if (a.size() < 3) { out = "usage: peek <obj|0xaddr> <hexOff> [count=8] [q|d|b]\n"; return; }
+    // A leading '!' reads a bare address, so heap blocks that are not UObjects (a TArray's element
+    // buffer, say) can be inspected too.
+    char* obj = nullptr;
+    if (a[1][0] == '!') {
+        obj = (char*)strtoull(a[1].c_str() + 1, nullptr, 16);
+    } else {
+        std::string err; UObject* o = ResolveObject(a[1], err);
+        if (!o) { out = err + "\n"; return; }
+        obj = (char*)o;
+    }
+    uint32_t off = (uint32_t)strtoul(a[2].c_str(), nullptr, 16);
+    int n = a.size() > 3 ? atoi(a[3].c_str()) : 8;
+    char kind = a.size() > 4 ? a[4][0] : 'q';
+    if (n < 1 || n > 64) n = 8;
+    char* base = obj + off;
+    // Probing raw addresses is how this command earns its keep, so it must never be able to fault the
+    // game: confirm the whole span is committed, readable memory first.
+    {
+        MEMORY_BASIC_INFORMATION mbi{};
+        size_t span = (size_t)n * (kind == 'b' ? 1 : kind == 'd' ? 4 : 8);
+        const DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                               PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+        if (!VirtualQuery(base, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT || !(mbi.Protect & readable) ||
+            (char*)mbi.BaseAddress + mbi.RegionSize < base + span) {
+            out = Format("unreadable memory at %p\n", (void*)base); return;
+        }
+    }
+    for (int i = 0; i < n; ++i) {
+        if (kind == 'b')      out += Format("  +0x%04X %02X\n", off + i, (unsigned)(uint8_t)base[i]);
+        else if (kind == 'd') out += Format("  +0x%04X %d\n", off + i * 4, *(int32_t*)(base + i * 4));
+        else {
+            void* v = *(void**)(base + i * 8);
+            out += Format("  +0x%04X %p", off + i * 8, v);
+            if (v && IsValidObject((UObject*)v)) out += "  " + GetFullName((UObject*)v);
+            out += "\n";
         }
     }
 }
@@ -248,6 +304,7 @@ void RegisterBasic() {
     console::Register("objects", "objects <Class> [max] [filter] - list live objects of class", CmdObjects);
     console::Register("actors", "actors <Class> [max] - actors in GWorld with location/role", CmdActors);
     console::Register("class", "class <Class> - chain, properties, functions", CmdClass);
+    console::Register("peek", "peek <obj|0xaddr> <hexOff> [count] [q|d|b] - raw memory", CmdPeek);
     console::Register("props", "props <obj|0xaddr|world|pc|pawn|gm|gi|engine|netdriver> [filter] - dump property values", CmdProps);
     console::Register("set", "set <obj> <prop> <value> - set a simple property", CmdSet);
     console::Register("call", "call <obj> <Function> [args] - ProcessEvent a UFunction", CmdCall);

@@ -734,17 +734,35 @@ static void HostNpcHpTick(float dt) {
 }
 
 // Play the death Blueprint on our own copy so the player sees the enemy blow up rather than vanish.
+//
+// DEFERRED deliberately. Message handlers run inside UActorChannel::ReceivedBunch -> ReceivedRPC ->
+// execClientMessage, i.e. in the middle of the net code consuming a bunch. Die runs an entire Blueprint
+// that spawns effects and destroys actors, and doing that re-entrantly from inside RPC dispatch took the
+// client down with an access violation in ProcessEvent's own parameter memcpy. The same call is
+// perfectly safe one tick later, off the receive path.
+static std::vector<uint64_t> g_pendingDeaths;
+
 static bool ApplyNpcDeath(const std::string& body) {
     if (!g_npcDeathFx) return true;
     unsigned long long guid = 0;
     if (sscanf(body.c_str(), "%llu", &guid) != 1) return true;
-    AActor* act = ActorFromNetGuid(guid);
-    if (!act || !IsValidObject((UObject*)act)) return true;
-    if (UFunction* fn = FindFunction((UObject*)act, "Die")) {
-        ProcessEvent((UObject*)act, fn, nullptr);
-        ++g_npcDeathsPlayed;
-    }
+    if (g_pendingDeaths.size() < 64) g_pendingDeaths.push_back(guid);
     return true;
+}
+
+// Runs on the game thread, outside the net receive path.
+void ClientDeathFxTick(float) {
+    if (g_pendingDeaths.empty()) return;
+    std::vector<uint64_t> due;
+    due.swap(g_pendingDeaths);
+    for (uint64_t guid : due) {
+        AActor* act = ActorFromNetGuid(guid);
+        if (!act || !IsValidObject((UObject*)act)) continue;
+        if (UFunction* fn = FindFunction((UObject*)act, "Die")) {
+            ProcessEvent((UObject*)act, fn, nullptr);
+            ++g_npcDeathsPlayed;
+        }
+    }
 }
 
 static bool ApplyNpcHp(const std::string& body) {
@@ -957,6 +975,28 @@ static void CmdJitter(const console::Args& a, std::string& out) {
                       ds / d.size(), d[d.size() / 2], d.back());
     }
     out += Format("  still sampling: %s\n", g_jitterLeft > 0 ? "yes" : "no");
+}
+
+// delegate <objAddr> <hexOffset> — decode a dynamic multicast delegate's invocation list.
+// TMulticastScriptDelegate is just TArray<TScriptDelegate>, and TScriptDelegate is
+// { FWeakObjectPtr Object; FName FunctionName } — so who is listening is directly readable. This is how
+// to tell "the HUD never subscribed" apart from "the HUD subscribed to a component that is now dead".
+static void CmdDelegate(const console::Args& a, std::string& out) {
+    if (a.size() < 3) { out = "usage: delegate <objAddr> <hexOffset>\n"; return; }
+    UObject* obj = (UObject*)strtoull(a[1].c_str(), nullptr, 16);
+    if (!IsValidObject(obj)) { out = "not a live UObject\n"; return; }
+    uint32_t off = (uint32_t)strtoul(a[2].c_str(), nullptr, 16);
+    struct Entry { int32_t idx; int32_t serial; FName fn; };
+    struct RawArray { Entry* Data; int32_t Num; int32_t Max; };
+    RawArray& list = UE_FIELD(RawArray, obj, off);
+    if (list.Num < 0 || list.Num > 256) { out = Format("implausible list (num=%d)\n", list.Num); return; }
+    out += Format("%s +0x%X: %d listener(s)\n", GetName(obj).c_str(), off, list.Num);
+    for (int i = 0; i < list.Num; ++i) {
+        UObject* target = (list.Data[i].idx >= 0) ? ObjectAt(list.Data[i].idx) : nullptr;
+        out += Format("  [%d] %-42s :: %s\n", i,
+                      target ? GetFullName(target).c_str() : "<dead/none>",
+                      list.Data[i].fn.ToString().c_str());
+    }
 }
 
 static void CmdNpcPos(const console::Args& a, std::string& out) {
@@ -1196,10 +1236,12 @@ void Register() {
     console::Register("combat", "combat [route 0/1|localfire 0/1|hphz N] - fire-routing status and player health", CmdCombat);
     console::Register("locktest", "locktest <playerId> <targetGuid> - set+read a lock in one call", CmdLockTest);
     console::Register("jitter", "jitter <guid> [sec] - per-frame motion steps of one NPC on THIS machine", CmdJitter);
+    console::Register("delegate", "delegate <objAddr> <hexOff> - who is bound to a multicast delegate", CmdDelegate);
     console::Register("npcpos", "npcpos [max] - NPC pawn positions keyed by NetGUID", CmdNpcPos);
     console::Register("guid", "guid <n> - resolve a NetGUID to an actor on this machine", CmdGuid);
     console::RegisterTick("jitter", JitterTick);
     console::RegisterTick("npcfollow", NpcFollowTick);
+    console::RegisterTick("deathfx", ClientDeathFxTick);
     console::Register("aiminfo", "aiminfo [npc] - weapon FocusLocation per player, or per NPC keyed by NetGUID", CmdAimInfo);
     console::Register("hp", "hp [Class] - health/shield ratios of pawns in the world", CmdHp);
     console::Register("lock", "lock [playerId] - acquire closest target (host: on that player's server-side pawn)", CmdLock);

@@ -20,7 +20,8 @@ bool OnClientOp(const std::string& op, const std::string& body);
 void ClientTick(float dt);
 void HostTick(float dt);
 void MaybeSendOnJoin();
-void HudRebindTick();   // re-point ES2's ingame HUD widget after the local pawn is replaced
+void HudRebindTick();                   // re-point ES2's ingame HUD widget after the local pawn is replaced
+void CrosshairCategoryTick(float dt);   // keep the client's reticle matching the equipped weapon
 void ResetSession();
 void ClientLocalShipTick();
 void ClientBuildWeaponsTick();

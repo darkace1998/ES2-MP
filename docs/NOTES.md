@@ -2,7 +2,7 @@
 
 ## State (2026-08-20): 2-player co-op with own ships, shared combat, world state and jumps
 
-### Validation re-run (2026-08-20, fresh build): 21/21
+### Validation re-run (2026-08-20, fresh build): 23/23
 Rebuilt from source and redeployed, then `scripts/coop-session.sh --kill` + `verify.py --travel`:
 all 21 checks pass. Session came up clean (host ListenServer, clientConnections=1, 2 PCs each
 with a pawn; client netmode=Client in the same world). Co-op jump host->S01L01 with the client
@@ -162,6 +162,26 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
 - Mirroring any AI signal needs edge-detection: ES2's AI calls `StartFire`/`StopFire` every tick it wants to be firing (8000+ calls in 35 s), not once per state change.
 - A client has no `AESGameModeBase`. Any ES2 path that reaches it — the whole damage/impact chain does — crashes there, so re-enabling local simulation on a client must go with suppressing that path.
 - ICF folds identical functions — never hook an RVA shared by >1 symbol (`gen_sdk.py` flags these).
+- **Never call back into ES2 gameplay from inside a mod message handler.** Handlers run in the middle of
+  `UActorChannel::ReceivedBunch -> ReceivedRPC -> execClientMessage`. Running the NPC death Blueprint
+  there (it spawns effects and destroys actors) re-entered `ProcessEvent` and took the client down with
+  an access violation in `ProcessEvent`'s own parameter `memcpy`. The exact same call is fine one tick
+  later — queue the work and drain it from a tick, as `ClientDeathFxTick` does.
+- **`WG_Ingame_HUD_C::ReInit` only rebinds the top-level widget.** Its children (`Crosshair`,
+  `PrimariesAndDevices`, `WG_JumpDrive`, …) cache the pawn's components in their own `Construct` and
+  ReInit does not cascade. After a pawn swap they still point at the retired pawn, so events fire on a
+  component nothing on screen is listening to. `RebindStaleChildWidgets` re-runs `Construct` on exactly
+  the children holding a component owned by some other actor.
+- **The reticle is one leg further on, and ES2 never drives it on a client.** The shape lives in
+  `WG_Crosshair_C::WeaponCategory` and is set by that widget's `SetWeaponCategory`. On a client the
+  switch itself works and the HUD's slot highlight follows it — only that one call is missing, so a
+  thermo gun fires under a coil gun's reticle. The value is the equipped `FWeaponInfo::WeaponItem`'s
+  `UItem::GetSubCategoryID()` (`cat_coil_gun`, `cat_thermo_gun`, …); the mod pushes it at 5 Hz and only
+  when it differs. `reticle` on the console reports every stage of that lookup.
+- Console `peek` reads raw memory and `class <0xaddr>` resolves a Blueprint class from an instance —
+  both needed because native C++ members (`FWeaponInfo::SpawnedWeapons`) have no UProperty and Blueprint
+  classes are not in the native class registry. `peek` VirtualQuery-checks the span first; probing a
+  bad address used to fault the game.
 
 ### Remaining
 - **A real 3–4 player run.** All structures are N-player and capacity is raised, but only two instances fit in this machine's RAM (~3 GB each).
