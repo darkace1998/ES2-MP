@@ -258,7 +258,29 @@ static void CmdNet(const console::Args&, std::string& out) {
     }
 }
 
+// Player capacity. AGameSession::MaxPlayers comes from the packaged ini (UE default 16), and
+// AGameSession::AtCapacity prefers the net.MaxPlayersOverride cvar when it is > 0. ES2 itself has no
+// player cap of its own, so co-op only needs this raised/confirmed, not patched.
+static void CmdMaxPlayers(const console::Args& a, std::string& out) {
+    AGameModeBase* gm = GetGameMode(GetWorld());
+    if (!gm) { out = "no game mode (host only)\n"; return; }
+    UObject* gs = UE_FIELD(UObject*, gm, es2off::AGameModeBase::GameSession);
+    if (!gs) { out = "no game session\n"; return; }
+    if (a.size() > 1) {
+        int n = atoi(a[1].c_str());
+        UE_FIELD(int32_t, gs, es2off::AGameSession::MaxPlayers) = n;
+        ExecConsoleCommand(Format("net.MaxPlayersOverride %d", n));
+        LOGF("[net] MaxPlayers -> %d", n);
+    }
+    out += Format("GameSession=%s MaxPlayers=%d MaxSpectators=%d (connected=%d)\n",
+                  GetName(gs).c_str(),
+                  UE_FIELD(int32_t, gs, es2off::AGameSession::MaxPlayers),
+                  UE_FIELD(int32_t, gs, es2off::AGameSession::MaxSpectators),
+                  players::Count());
+}
+
 void Register() {
+    console::Register("maxplayers", "maxplayers [N] - show/raise the host's player capacity", CmdMaxPlayers);
     console::Register("listen", "listen [port=7777] - turn current world into a listen server", CmdListen);
     console::Register("connect", "connect <ip[:port]> - open <addr> (join a host)", CmdConnect);
     console::Register("travel", "travel <map> - UWorld::ServerTravel", CmdTravel);

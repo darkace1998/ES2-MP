@@ -166,6 +166,7 @@ OFFSETS = {
     'AController': ['Pawn', 'PlayerState', 'Character', 'ControlRotation'],
     'APlayerController': ['Player', 'AcknowledgedPawn', 'PlayerCameraManager', 'MyHUD', 'NetConnection', 'PendingSwapConnection', 'PlayerInput', 'CheatManager', 'CheatClass'],
     'APlayerState': ['PlayerId', 'PlayerNamePrivate', 'bIsABot', 'bOnlySpectator', 'UniqueId'],
+    'AGameSession': ['MaxSpectators', 'MaxPlayers', 'MaxPartySize'],
     'AGameModeBase': ['GameSessionClass', 'GameStateClass', 'PlayerControllerClass', 'PlayerStateClass', 'HUDClass', 'DefaultPawnClass', 'SpectatorClass', 'ReplaySpectatorPlayerControllerClass', 'ServerStatReplicatorClass', 'GameSession', 'GameState', 'OptionsString', 'bUseSeamlessTravel', 'bStartPlayersAsSpectators', 'bPauseable'],
     'UNetDriver': ['NetDriverName', 'ClientConnections', 'ServerConnection', 'World', 'NetConnectionClass', 'MaxInternetClientRate', 'MaxClientRate', 'ServerTravelPause', 'ElapsedTime', 'NetServerMaxTickRate'],
     'UNetConnection': ['Children', 'Driver', 'PackageMap', 'OpenChannels', 'SentTemporaries', 'ViewTarget', 'OwningActor', 'MaxPacket', 'PlayerController', 'URL', 'LastReceiveTime', 'ClientLoginState', 'PlayerId'],

@@ -53,10 +53,10 @@ two rendered 720p instances.
 | **P0 Toolchain & loader** ✅ | zig build, `dwmapi.dll` proxy, launch scripts (Steam & direct Proton), logger, PDB tools, skills | DLL loads in game, log written, game still runs |
 | **P1 Engine access layer** ✅ | GUObjectArray/FNamePool access, UObject iteration, FName↔string, class/property/function lookup, ProcessEvent, console-command exec, TCP debug console, MinHook hooks | from console: `objects AESPawn`, `exec stat fps`, `props <obj>` work |
 | **P2 Networking bring-up** ✅ | host `listen`, client `connect ip`, both load same level, server sees 2 PlayerControllers, client gets a pawn; GameMode-on-client shim; survive a few minutes | two local instances, net status in console, no crash |
-| **P3 Player ship sync (2P)** 🟡 (channel live; interp+loadout pending) | each side sees the other's ship moving; remote ship spawned via `SpawnDefaultPawnAtTransform`/`SpawnPlayerShip`; transform sync client→host via RPC channel, host→clients via replicated movement; interpolation | fly around each other in one location |
-| **P4 Combat sync** | host-authoritative NPCs replicated to clients, client-side spawners/AI suppressed, damage from clients routed to host, health/shield replicated, projectiles visual | kill the same enemies together |
-| **P5 World state** | location jumps (`ServerTravel` + clients follow), docking/stations, missions/dialog gating, loot, save handling (each player keeps own ship/loadout; world progress = host) | play a mission together |
-| **P6 4 players & polish** | star topology already N-player; per-player channel/ids, join-in-progress, UI (join/host menu via ImGui or console), Steam P2P/NAT (OnlineSubsystemSteam `steam.<id>` URLs) | 4 local/LAN instances |
+| **P3 Player ship sync (2P)** ✅ | each side sees the other's ship moving; remote ship spawned via `SpawnDefaultPawnAtTransform`/`SpawnPlayerShip`; transform sync client→host via RPC channel, host→clients via replicated movement; interpolation | fly around each other in one location |
+| **P4 Combat sync** ✅ (fire routing + health; damage attribution still host-side) | host-authoritative NPCs replicated to clients, client-side spawners/AI suppressed, damage from clients routed to host, health/shield replicated, projectiles visual | kill the same enemies together |
+| **P5 World state** 🟡 (travel done; missions/loot/docking pending) | location jumps (`ServerTravel` + clients follow), docking/stations, missions/dialog gating, loot, save handling (each player keeps own ship/loadout; world progress = host) | play a mission together |
+| **P6 4 players & polish** 🟡 (N-player structures + capacity done; Steam P2P + UI pending) | star topology already N-player; per-player channel/ids, join-in-progress, UI (join/host menu via ImGui or console), Steam P2P/NAT (OnlineSubsystemSteam `steam.<id>` URLs) | 4 local/LAN instances |
 
 Primary target: **2-player**; all data structures are per-player arrays (max 4) from the start.
 

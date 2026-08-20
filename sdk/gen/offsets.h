@@ -261,6 +261,12 @@ namespace es2off {
     constexpr uint32_t bOnlySpectator = 0x2B2; // unsigned char : 1 @bit2 (size 1) from APlayerState
     constexpr uint32_t UniqueId = 0x2B8; // FUniqueNetIdRepl (size 48) from APlayerState
   }
+  namespace AGameSession {
+    constexpr uint32_t __size = 720;
+    constexpr uint32_t MaxSpectators = 0x2A8; // int (size 4) from AGameSession
+    constexpr uint32_t MaxPlayers = 0x2AC; // int (size 4) from AGameSession
+    constexpr uint32_t MaxPartySize = 0x2B0; // int (size 4) from AGameSession
+  }
   namespace AGameModeBase {
     constexpr uint32_t __size = 832;
     constexpr uint32_t GameSessionClass = 0x2B8; // TSubclassOf<AGameSession> (size 8) from AGameModeBase
