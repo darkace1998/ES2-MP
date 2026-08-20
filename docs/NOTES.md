@@ -92,6 +92,10 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
 ### Remaining
 - **A real 3–4 player run.** All structures are N-player and capacity is raised, but only two instances fit in this machine's RAM (~3 GB each).
 - **Completing a Steam connection.** Everything up to the peer is verified on one machine; a second Steam account that is friends with the host is required.
+- **Join latency.** From entering the host's world to the client's loadout being fully transferred is
+  now ~16 s (was ~29 s): ~12 s waiting on the HELLO/WELCOME handshake and ~4 s for the 54-chunk blob.
+  Neither HELLO nor the loadout export needs a pawn — the export reads this process's UPlayerData —
+  and both used to wait for one. The remaining ~12 s is the handshake itself, not the transfer.
 - **Only weapon *trigger* state is mirrored.** Aim direction, target lock and NPC movement still come from whatever the client's own copy of the actor is doing, so mirrored fire is visually plausible rather than frame-exact.
 - **XP not yet observed firing.** The path is implemented and armed, but the harness cannot reliably make a parked ship land a kill, so no live award has been measured.
 - **Docking, stations, and mission *item* rewards** are not mirrored; `UMissionLib::AddNonItemRewards` is mapped (XP + credits + job score — it does *not* grant faction standing) but not yet hooked.

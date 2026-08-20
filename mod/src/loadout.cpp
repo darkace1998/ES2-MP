@@ -421,9 +421,9 @@ void ClientBuildWeaponsTick() {
 }
 
 // ---------------------------------------------------------------- transport
-static void StartSend() {
+static bool StartSend() {
     std::string text, err;
-    if (!ExportLocalShip(text, err)) { LOGF("[loadout] export failed: %s", err.c_str()); return; }
+    if (!ExportLocalShip(text, err)) { LOGF("[loadout] export failed: %s", err.c_str()); return false; }
     if (!g_tweakFrom.empty()) {
         size_t n = 0, pos = 0;
         while ((pos = text.find(g_tweakFrom, pos)) != std::string::npos) { text.replace(pos, g_tweakFrom.size(), g_tweakTo); pos += g_tweakTo.size(); ++n; }
@@ -434,6 +434,7 @@ static void StartSend() {
     g_sendSeq = 0;
     g_sendTotal = (int)((text.size() + kChunk - 1) / kChunk);
     LOGF("[loadout] sending ship: %zu chars in %d chunks", text.size(), g_sendTotal);
+    return true;
 }
 
 void ClientTick(float dt) {
@@ -752,11 +753,13 @@ void OnInit() {
 // client: send our ship once we are connected and flying
 void MaybeSendOnJoin() {
     if (g_sentThisSession) return;
-    APlayerController* pc = GetFirstLocalPlayerController(GetWorld());
-    AActor* pawn = pc ? UE_FIELD(AActor*, pc, es2off::AController::Pawn) : nullptr;
-    if (!pawn) return;
+    // Don't wait for a pawn: the export reads this process's UPlayerData (via GetCurrentShip), not the
+    // pawn, so a pawn is not a precondition — and waiting for one delayed the whole loadout by the time
+    // it took the host to spawn and replicate a placeholder ship. The real precondition is simply that
+    // the export succeeds, so gate on that and retry next tick if the player data is not ready yet.
+    // Latching before the attempt (as this used to) meant a single early failure was never retried.
+    if (!StartSend()) return;
     g_sentThisSession = true;
-    StartSend();
 }
 void ResetSession() {
     g_sentThisSession = false; g_pendingSend.clear(); g_sendOffset = 0;

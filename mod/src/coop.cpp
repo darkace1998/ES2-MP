@@ -341,7 +341,12 @@ static void Tick(float dt) {
         respawn::Tick(dt, true);
     } else if (r == Role::Client) {
         // The first HELLO can be dropped if it beats the connection into steady state; retry until acknowledged.
-        if (!g_welcomed && LocalPawn()) {
+        // HELLO only needs a local controller — the host registers the joining player by its
+        // PlayerController and replies with an id. Requiring a pawn here held the whole handshake
+        // (and therefore the loadout transfer behind it) until the host's placeholder ship had been
+        // spawned and replicated back, which measured 18-25 s. If we do send during a transition map,
+        // the world-change reset below clears g_welcomed and we simply say hello again.
+        if (!g_welcomed && GetFirstLocalPlayerController(GetWorld())) {
             g_helloAccum += dt;
             if (!g_helloSent || g_helloAccum > 2.0) { SendToServer("HELLO|client"); g_helloSent = true; g_helloAccum = 0; }
         }
