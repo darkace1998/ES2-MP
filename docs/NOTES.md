@@ -3,7 +3,7 @@
 ## State (2026-08-20): 2-player co-op with own ships, shared combat, world state and jumps
 
 Bring up:  `scripts/coop-session.sh --kill`   (add `--steam` to host over Steam P2P)
-Check it:  `python3 scripts/verify.py --travel`   → **18/18 checks pass**
+Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 without `--travel`)
 
 ### Working
 | Area | What it does |
@@ -11,7 +11,9 @@ Check it:  `python3 scripts/verify.py --travel`   → **18/18 checks pass**
 | Session | host `listen`, client `connect`, HELLO/WELCOME handshake, 4-slot player registry |
 | Ship movement | owning client is authoritative (host clears `bReplicateMovement`), host mirrors with dead-reckoning and relays to other clients. No rubberbanding. |
 | Per-player loadout | each client streams its own ship (`FShipDataState` → engine text, ~25 KB) and the host substitutes the spawner's single `GetCurrentShip()` call. Proven by rewriting a weapon id in the client's own blob. |
-| Combat | client forwards fire intent; the host presses the trigger on that player's server-side controller, so shots/damage/kills happen in the authoritative simulation |
+| Client's own ship, locally | a client builds its **own** weapons, devices and consumables through the vanilla component path. ES2 gates all three on `ShipData.Inventory` being non-null and nothing else, so filling ShipData from the client's own `UPlayerData` *before* `PostInitializeComponents` is enough — no authority check is involved anywhere in that chain. |
+| Combat | client forwards fire intent; the host presses the trigger on that player's server-side controller, so shots/damage/kills happen in the authoritative simulation. A client never applies damage itself (`ApplyESPointDamage` no-oped in the client role). |
+| Enemies you can see shooting | NPC AI runs only on the host and ES2 replicates none of it, so enemies looked inert to a client. The host mirrors weapon trigger *transitions* keyed by `FNetGUIDCache` NetGUID; each side resolves its own copy of the actor and calls the real `StartFire`/`StopFire`. |
 | Client authority | measured: a client has 0 AIControllers and 0 authoritative pawns; UE already suppresses this. Spawn census + guard exist as a safety net. |
 | Missions | host observes `UMissionLib::UpdateTaskInPlayerData` (dirty-diffed, allocation-free hot path) plus the two writers it cannot see — `UPlayerData::OnMissionCompleted` and `ChangeTrackedMission_Internal`. Client writes its own `FTaskSaveGameData` and refreshes indicators. |
 | Dialog | mirrored from the in-game `UDialogManager` singleton only (menu chatter filtered) |
@@ -33,11 +35,16 @@ Check it:  `python3 scripts/verify.py --travel`   → **18/18 checks pass**
 - `UMissionLib::UpdateTaskInPlayerData` is called **every frame** from `AMissionTaskBase::Tick`.
 - Two modules must never hook the same RVA (MinHook refuses the second).
 - `windows.h` `#define`s `GetClassName` → renamed ours to `GetObjectClassName`.
+- `PostInitializeComponents` runs **strictly before** `BeginPlay`. Anything a component reads in `InitializeComponent` must already be there — fixing ship data at BeginPlay is one frame too late and leaves an unarmed default ship.
+- `FNetworkGUID` is 8 bytes but **not trivially copyable**, so it returns through a hidden pointer like any large struct. Getting this wrong puts an argument in the sret slot and faults inside `FNetGUIDCache::SupportsObject`.
+- Mirroring any AI signal needs edge-detection: ES2's AI calls `StartFire`/`StopFire` every tick it wants to be firing (8000+ calls in 35 s), not once per state change.
+- A client has no `AESGameModeBase`. Any ES2 path that reaches it — the whole damage/impact chain does — crashes there, so re-enabling local simulation on a client must go with suppressing that path.
 - ICF folds identical functions — never hook an RVA shared by >1 symbol (`gen_sdk.py` flags these).
 
 ### Remaining
 - **A real 3–4 player run.** All structures are N-player and capacity is raised, but only two instances fit in this machine's RAM (~3 GB each).
 - **Completing a Steam connection.** Everything up to the peer is verified on one machine; a second Steam account that is friends with the host is required.
+- **Only weapon *trigger* state is mirrored.** Aim direction, target lock and NPC movement still come from whatever the client's own copy of the actor is doing, so mirrored fire is visually plausible rather than frame-exact.
 - **XP not yet observed firing.** The path is implemented and armed, but the harness cannot reliably make a parked ship land a kill, so no live award has been measured.
 - **Docking, stations, and mission *item* rewards** are not mirrored; `UMissionLib::AddNonItemRewards` is mapped (XP + credits + job score — it does *not* grant faction standing) but not yet hooked.
 - **Mission records that only one side has.** The client applies deltas to existing `FTaskSaveGameData` records; creating one from scratch (320 bytes with TArray/TMap members) is deliberately not attempted.
