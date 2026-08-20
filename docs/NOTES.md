@@ -36,6 +36,14 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
 | Capacity | `maxplayers` (GameSession default 16; ES2 has no cap of its own) |
 
 ### Hard-won gotchas (each cost a crash or a silent failure)
+- **`-nullrhi` hosts crash the moment a weapon fires.** `AWeaponBase::PlayWeaponFireFX` (rva 0x12D55F8)
+  calls `UGameplayStatics::SpawnEmitterAttached(MuzzleFlashParticleSystem, RootComponent, ...)` and then
+  does `and byte ptr [rax+0x513], -2` on the result **without a null check**. Without an RHI that spawn
+  returns null, so the host dies with `EXCEPTION_ACCESS_VIOLATION writing address 0x513` inside
+  `ProcessNewShot -> ProcessFiring -> PlayWeaponFireFX`. Nothing to do with co-op — it is ES2's missing
+  null check — but it makes `--nullrhi-host` unusable for anything that shoots. Guard the FX call (skip
+  when `AActor::RootComponent` @0x1B8 is null) if a headless host is wanted for 3-4P testing.
+
 - MSVC x64 large-struct returns: **member** functions are `(this, sret)`; **static** ones are `(sret)`.
 - `FString`/`TSubclassOf` "by value" params are passed **indirectly**; taking one by value in a detour double-frees it.
 - Hooking a function the engine re-enters needs a re-entrancy guard (`CreateShipDataFromState` → `GetCurrentShip`), and when only one call site matters, filter on `__builtin_return_address(0)` — the spawner calls `GetCurrentShip` ~850×.
