@@ -121,7 +121,12 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
   keyed by the same NetGUID the trigger mirroring uses. Only firing shooters are sent, at 10 Hz, six per
   tick round-robin, so a busy fight cannot flood the reliable channel. Verified by matched NetGUID:
   identical focus on both machines, bar the ~100 ms of staleness while an NPC is turning.
-  Still NOT synced for any shooter: auto-aim target and missile lock, so homing weapons can diverge.
+  The locked target rides along with both streams as a NetGUID and is applied through ES2's own
+  `UWeaponComponent::SetLockedTarget`, which drives the missile-lock timer and the OnNewTargetLocked /
+  OnTargetUnLocked events — poking the `LockedTarget` weak pointer would set the field without any of
+  that. Apply only on change: the setter restarts the lock, so calling it every tick pins the missile
+  lock at zero forever. Still not synced: `CurrentAutoAimTarget` (ES2 recomputes it locally each tick
+  from the focus point, which is now correct, so it largely follows on its own).
 - **XP not yet observed firing.** The path is implemented and armed, but the harness cannot reliably make a parked ship land a kill, so no live award has been measured.
 - **Docking, stations, and mission *item* rewards** are not mirrored; `UMissionLib::AddNonItemRewards` is mapped (XP + credits + job score — it does *not* grant faction standing) but not yet hooked.
 - **Mission records that only one side has.** The client applies deltas to existing `FTaskSaveGameData` records; creating one from scratch (320 bytes with TArray/TMap members) is deliberately not attempted.

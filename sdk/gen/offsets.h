@@ -527,6 +527,8 @@ namespace es2off {
     constexpr uint32_t FocusLocation = 0x888; // UE::Math::TVector<double> (size 24) from UWeaponComponent
     constexpr uint32_t ClampedNonAutoAimedFocusLocation = 0x870; // UE::Math::TVector<double> (size 24) from UWeaponComponent
     constexpr uint32_t CurrentAutoAimTarget = 0x728; // AActor * (size 8) from UWeaponComponent
+    constexpr uint32_t LockedTarget = 0x8C0; // TWeakObjectPtr<AActor,FWeakObjectPtr> (size 8) from UWeaponComponent
+    constexpr uint32_t RemainingMissileLockTime = 0x9A0; // float (size 4) from UWeaponComponent
     constexpr uint32_t OverrideShootAtTarget = 0x720; // TWeakObjectPtr<AActor,FWeakObjectPtr> (size 8) from UWeaponComponent
     constexpr uint32_t bUseAutoAiming = 0x288; // bool (size 1) from UWeaponComponent
     constexpr uint32_t bShootWeaponsAtFocusLocation = 0x26A; // bool (size 1) from UWeaponComponent

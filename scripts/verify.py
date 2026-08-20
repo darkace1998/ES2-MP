@@ -146,6 +146,25 @@ def main():
           bool(live and bound) and bound.lstrip('0').lower() == live.group(2).lstrip('0').lower(),
           f'hud={bound} live={live.group(2) if live else "?"}')
 
+    # Aim + target lock must reach the host, which is what actually fires for a client. The host's copy
+    # of the client's weapon component has no player behind it, so without the sync its FocusLocation is
+    # NaN and it has no lock at all. Compare by NetGUID — the actor is a different UObject per machine.
+    con(CLIENT, 'lock')
+    time.sleep(3)
+    def aim_of(port):
+        out = con(port, 'aiminfo')
+        blk = re.search(r'^\s+p1\s.*?\n\s+focus=\((-?[\d.]+), (-?[\d.]+), (-?[\d.]+)\).*?\n\s+lock:(.*)$',
+                        out, re.M | re.S)
+        if not blk: return None, None
+        focus = (blk.group(1), blk.group(2), blk.group(3))
+        g = re.search(r'primary=\S*?\(guid (\d+)\)', blk.group(4))
+        return focus, (g.group(1) if g else None)
+    hf, hg = aim_of(HOST)
+    cf, cg = aim_of(CLIENT)
+    check("client's aim reaches the host", bool(hf and cf) and hf == cf, f'host={hf} client={cf}')
+    check("client's target lock reaches the host",
+          bool(hg and cg) and hg == cg and hg != '0', f'host guid={hg} client guid={cg}')
+
     # A weapon swap must move UWeaponComponent::EquippedSlotIndex on the client.
     def equipped():
         m = re.search(r'PrimaryWeapons: \d+ slot\(s\), equipped=(\d+)', con(CLIENT, 'shipdata weapons'))
