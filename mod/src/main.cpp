@@ -13,6 +13,7 @@ namespace net { void Register(); void OnInit(); }
 #include "combat.h"
 #include "loadout.h"
 #include "travel.h"
+#include "world_state.h"
 
 namespace {
 HMODULE g_self = nullptr;
@@ -52,6 +53,7 @@ DWORD WINAPI InitThread(LPVOID) {
     combat::Register();
     loadout::Register();
     travel::Register();
+    world_state::Register();
 
     // console port: base 27100 (+0.. depending on free)
     int basePort = 27100;
@@ -68,6 +70,7 @@ DWORD WINAPI InitThread(LPVOID) {
     combat::OnInit();
     loadout::OnInit();
     travel::OnInit();
+    world_state::OnInit();
     g_initialized = true;
     LOGF("init complete");
     return 0;

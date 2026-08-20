@@ -13,6 +13,7 @@
 #include "combat.h"
 #include "loadout.h"
 #include "travel.h"
+#include "world_state.h"
 #include <windows.h>
 #include <cmath>
 #include <cstring>
@@ -233,6 +234,7 @@ bool OnServerMessage(APlayerController* fromPC, const std::string& raw) {
     if (combat::OnServerOp(fromPC, op, body)) return true;
     if (loadout::OnServerOp(fromPC, op, body)) return true;
     if (travel::OnServerOp(fromPC, op, body)) return true;
+    if (world_state::OnServerOp(fromPC, op, body)) return true;
     LOGF("[coop] unhandled client op '%s'", op.c_str());
     return true;
 }
@@ -271,6 +273,7 @@ bool OnClientMessage(APlayerController* toPC, const std::string& raw) {
     if (combat::OnClientOp(op, body)) return true;
     if (loadout::OnClientOp(op, body)) return true;
     if (travel::OnClientOp(op, body)) return true;
+    if (world_state::OnClientOp(op, body)) return true;
     LOGF("[coop] unhandled host op '%s'", op.c_str());
     return true;
 }
@@ -327,6 +330,7 @@ static void Tick(float dt) {
         SmoothRemotePawns(dt);
         combat::Tick(dt, true);
         loadout::HostTick(dt);
+        world_state::Tick(dt, true);
     } else if (r == Role::Client) {
         // The first HELLO can be dropped if it beats the connection into steady state; retry until acknowledged.
         if (!g_welcomed && LocalPawn()) {
@@ -337,6 +341,7 @@ static void Tick(float dt) {
         if (g_sendAccum >= 1.0 / g_sendHz) { g_sendAccum = 0; SendLocalTransform(); }
         SmoothRemotePawns(dt);   // other players' ships, fed by the host's PT relay
         if (g_welcomed) { loadout::MaybeSendOnJoin(); loadout::ClientTick(dt); }
+        world_state::Tick(dt, false);
     }
 }
 
@@ -424,6 +429,7 @@ void OnInit() {
 void OnPostLogin(APlayerController* pc) {
     if (CurrentRole() != Role::Host) return;   // single-player map loads fire PostLogin too
     players::RegisterController(pc);
+    world_state::OnPlayerJoined(pc);
 }
 void OnLogout(APlayerController* pc) { players::UnregisterController(pc); }
 }

@@ -390,6 +390,8 @@ namespace es2off {
   }
   namespace AESPawn {
     constexpr uint32_t __size = 4912;
+    constexpr uint32_t XP = 0x3B8; // UXPComponent * (size 8) from AESPawn
+    constexpr uint32_t LootDrop = 0x3A8; // ULootDropComponent * (size 8) from AESPawn
     constexpr uint32_t ShipData = 0x4B8; // FShipData (size 976) from AESPawn
     constexpr uint32_t bGetShipModulesFromShipData = 0x8B8; // bool (size 1) from AESPawn
     constexpr uint32_t bGetShipColorsFromShipData = 0x9D8; // bool (size 1) from AESPawn
@@ -414,6 +416,33 @@ namespace es2off {
     constexpr uint32_t Ships = 0x468; // TArray<FShipData,TSizedDefaultAllocator<32> > (size 16) from UPlayerData
     constexpr uint32_t ShipsSaveState = 0x478; // TArray<FShipDataState,TSizedDefaultAllocator<32> > (size 16) from UPlayerData
     constexpr uint32_t CurrentShip = 0x119C; // int (size 4) from UPlayerData
+  }
+  namespace FTaskSaveGameData {
+    constexpr uint32_t __size = 320;
+    constexpr uint32_t TaskID = 0x30; // FName (size 8) from FTaskSaveGameData
+    constexpr uint32_t TaskState = 0x38; // TEnumAsByte<enum EMissionTaskState::Type> (size 1) from FTaskSaveGameData
+    constexpr uint32_t Stage = 0x3C; // int (size 4) from FTaskSaveGameData
+    constexpr uint32_t Progress = 0x40; // int (size 4) from FTaskSaveGameData
+    constexpr uint32_t LocationID = 0x60; // FName (size 8) from FTaskSaveGameData
+    constexpr uint32_t StationID = 0x68; // FName (size 8) from FTaskSaveGameData
+    constexpr uint32_t TimeStamp = 0x58; // float (size 4) from FTaskSaveGameData
+    constexpr uint32_t bIsMission = 0x5C; // bool (size 1) from FTaskSaveGameData
+  }
+  namespace AMissionTaskBase {
+    constexpr uint32_t __size = 1008;
+    constexpr uint32_t MissionTaskID = 0x2B0; // FName (size 8) from AMissionTaskBase
+    constexpr uint32_t LocationID = 0x2B8; // FName (size 8) from AMissionTaskBase
+    constexpr uint32_t StationID = 0x2C0; // FName (size 8) from AMissionTaskBase
+    constexpr uint32_t TaskState = 0x2D8; // TEnumAsByte<enum EMissionTaskState::Type> (size 1) from AMissionTaskBase
+    constexpr uint32_t bIsHidden = 0x2F1; // bool (size 1) from AMissionTaskBase
+    constexpr uint32_t ProgressValue = 0x300; // int (size 4) from AMissionTaskBase
+    constexpr uint32_t StageValue = 0x304; // int (size 4) from AMissionTaskBase
+    constexpr uint32_t TimeStamp = 0x310; // float (size 4) from AMissionTaskBase
+  }
+  namespace UXPComponent {
+    constexpr uint32_t __size = 176;
+    constexpr uint32_t XP = 0xA0; // float (size 4) from UXPComponent
+    constexpr uint32_t NeededPlayerDamageRatio = 0xA8; // float (size 4) from UXPComponent
   }
   namespace UGameData {
     constexpr uint32_t __size = 1120;

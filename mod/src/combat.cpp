@@ -16,6 +16,7 @@
 #include <windows.h>
 #include <cstdlib>
 #include <cstdio>
+#include <cmath>
 
 using namespace ue;
 using es2coop::Format;
@@ -191,6 +192,54 @@ static void CmdGod(const console::Args& a, std::string& out) {
     out += Format("god=%d applied to %d component(s) of %s\n", (int)on, n, GetName((UObject*)pawn).c_str());
 }
 
+// lock [playerId] - make a ship acquire its closest target so routed fire actually has something to aim at.
+// On the host, `lock <id>` locks on THAT player's server-side pawn (the one whose weapons really fire).
+using Fn_PawnVoid = void (*)(AActor*);
+static void CmdLock(const console::Args& a, std::string& out) {
+    AActor* pawn = nullptr;
+    if (a.size() > 1) {
+        players::Player* p = players::ById(atoi(a[1].c_str()));
+        if (p) pawn = p->pawn;
+    } else {
+        APlayerController* pc = LocalPC();
+        pawn = pc ? UE_FIELD(AActor*, pc, es2off::AController::Pawn) : nullptr;
+    }
+    if (!pawn) { out = "no pawn\n"; return; }
+    Rva<std::remove_pointer_t<Fn_PawnVoid>>(es2rva::AESPawn_LockClosestTarget)(pawn);
+    using Fn_GetLocked = AActor* (*)(AActor*);
+    AActor* t = Rva<std::remove_pointer_t<Fn_GetLocked>>(es2rva::AESPawn_GetLockedTarget)(pawn);
+    out += Format("%s -> locked target: %s\n", GetName((UObject*)pawn).c_str(), GetFullName((UObject*)t).c_str());
+}
+
+// aim [playerId] - lock the closest target AND point the hull at it. ES2's auto-aim only covers a narrow
+// cone, so a ship parked facing the wrong way never lands a shot; this makes automated combat tests possible.
+static void CmdAim(const console::Args& a, std::string& out) {
+    AActor* pawn = nullptr;
+    if (a.size() > 1) { players::Player* p = players::ById(atoi(a[1].c_str())); if (p) pawn = p->pawn; }
+    else { APlayerController* pc = LocalPC(); pawn = pc ? UE_FIELD(AActor*, pc, es2off::AController::Pawn) : nullptr; }
+    if (!pawn) { out = "no pawn\n"; return; }
+    Rva<std::remove_pointer_t<Fn_PawnVoid>>(es2rva::AESPawn_LockClosestTarget)(pawn);
+    using Fn_GetLocked = AActor* (*)(AActor*);
+    AActor* t = Rva<std::remove_pointer_t<Fn_GetLocked>>(es2rva::AESPawn_GetLockedTarget)(pawn);
+    if (!t || !IsValidObject((UObject*)t)) { out = "no target locked\n"; return; }
+    FTransform mine = GetActorTransform(pawn), theirs = GetActorTransform(t);
+    double dx = theirs.Translation.X - mine.Translation.X;
+    double dy = theirs.Translation.Y - mine.Translation.Y;
+    double dz = theirs.Translation.Z - mine.Translation.Z;
+    double len = sqrt(dx*dx + dy*dy + dz*dz);
+    if (len < 1e-3) { out = "target is on top of us\n"; return; }
+    dx /= len; dy /= len; dz /= len;
+    // UE FRotator (radians here) -> FQuat, roll = 0
+    double yaw = atan2(dy, dx);
+    double pitch = atan2(dz, sqrt(dx*dx + dy*dy));
+    double sp = sin(pitch * 0.5), cp = cos(pitch * 0.5);
+    double sy = sin(yaw * 0.5),   cy = cos(yaw * 0.5);
+    FTransform next = mine;
+    next.Rotation = FQuat{  sp * sy, -sp * cy,  cp * sy,  cp * cy };
+    SetActorTransform(pawn, next, false, 1);
+    out += Format("%s aimed at %s (%.0f uu away)\n", GetName((UObject*)pawn).c_str(), GetName((UObject*)t).c_str(), len);
+}
+
 static void CmdHp(const console::Args& a, std::string& out) {
     // hp [ClassFilter] — health/shield of matching pawns in the world
     std::string cls = a.size() > 1 ? a[1] : "ESPawn";
@@ -207,6 +256,8 @@ void Register() {
     console::Register("fire", "fire [primary|secondary] [on|off] - press the local fire trigger (routes to host on a client)", CmdFire);
     console::Register("combat", "combat [route 0/1|localfire 0/1|hphz N] - fire-routing status and player health", CmdCombat);
     console::Register("hp", "hp [Class] - health/shield ratios of pawns in the world", CmdHp);
+    console::Register("lock", "lock [playerId] - acquire closest target (host: on that player's server-side pawn)", CmdLock);
+    console::Register("aim", "aim [playerId] - lock closest target and point the hull at it (test aid)", CmdAim);
     console::Register("god", "god [0|1] - make the local ship undepletable (test aid)", CmdGod);
 }
 
