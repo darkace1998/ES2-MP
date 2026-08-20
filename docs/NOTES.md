@@ -36,6 +36,14 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
 | Capacity | `maxplayers` (GameSession default 16; ES2 has no cap of its own) |
 
 ### Hard-won gotchas (each cost a crash or a silent failure)
+- **`TSubclassOf` really is passed indirectly.** `UWidgetBlueprintLibrary::Create` opens with
+  `mov rbp, qword ptr [rdx]` — it dereferences the class argument. Passing the `UClass*` by value makes
+  it read the pointer as an address and return null ("CreateWidget failed"). Pass `&theClass`.
+- **`UPanelWidget` has no `InsertChildAt`** in this build (only AddChild/RemoveChild/RemoveChildAt), so an
+  injected menu entry can only be appended. The main menu's VerticalBox has no spare room either: two
+  extra rows pushed the DLC entry off the panel, which is why the multiplayer entry doubles as its own
+  status line rather than adding a second row.
+
 - **The HUD caches the pawn; co-op replaces it.** `WG_Ingame_HUD_C` is created under the GameInstance,
   resolves the player pawn and its weapon/device/consumable components once in `Construct`, and ES2 never
   rebinds — single-player never swaps the player pawn. After the loadout placeholder swap (or a respawn)

@@ -101,6 +101,12 @@ RVAS = {
     'AESPlayerController_InputChargeTravelModeReleased': 'private: void __cdecl AESPlayerController::InputChargeTravelModeReleased(void)',
     'AESPlayerController_InputChargeCruiseMode': 'private: void __cdecl AESPlayerController::InputChargeCruiseMode(void)',
     'AESPlayerController_InputChargeCruiseModeReleased': 'private: void __cdecl AESPlayerController::InputChargeCruiseModeReleased(void)',
+    # Main-menu multiplayer UI: create an ES2 menu button, label it, and splice it into the menu's
+    # own VerticalBox so it looks and behaves like a stock entry.
+    'UWidgetBlueprintLibrary_Create': 'public: static class UUserWidget * __cdecl UWidgetBlueprintLibrary::Create(class UObject *, class TSubclassOf<class UUserWidget>, class APlayerController *)',
+    'UPanelWidget_RemoveChild': 'public: bool __cdecl UPanelWidget::RemoveChild(class UWidget *)',
+    'UPanelWidget_AddChild': 'public: class UPanelSlot * __cdecl UPanelWidget::AddChild(class UWidget *, class UPanelSlot *)',
+    'FText_FromString': 'public: static class FText __cdecl FText::FromString(class FString const &)',
     'UGameplayLib_ApplyESRadialDamage': 'public: static bool __cdecl UGameplayLib::ApplyESRadialDamage(class UObject const *, struct FDamageInfo, struct UE::Math::TVector<double> const &, float, class TArray<class AActor *, class TSizedDefaultAllocator<32>> const &, bool &, struct FWeaponData, class TArray<class AActor *, class TSizedDefaultAllocator<32>> &, class TArray<class AActor *, class TSizedDefaultAllocator<32>> &, class TArray<struct FHitResult, class TSizedDefaultAllocator<32>> &, float, float, class AActor *, class AController *, bool, bool, bool, bool)',
     'UGameplayLib_ApplyESPointDamage': 'public: static struct FDamageInfo __cdecl UGameplayLib::ApplyESPointDamage(class AActor *, struct FDamageInfo, struct UE::Math::TVector<double> const &, struct FHitResult const &, class AController *, class AActor *, bool &, struct FWeaponData, float, float, bool)',
     'FNetGUIDCache_GetNetGUID': 'public: class FNetworkGUID __cdecl FNetGUIDCache::GetNetGUID(class UObject const *) const',

@@ -8,6 +8,7 @@
 
 namespace commands { void RegisterBasic(); }
 namespace net { void Register(); void OnInit(); }
+namespace menu { void Register(); void OnInit(); }
 #include "coop.h"
 #include "authority.h"
 #include "combat.h"
@@ -52,6 +53,7 @@ DWORD WINAPI InitThread(LPVOID) {
     if (!hooks::Init()) return 0;
     commands::RegisterBasic();
     net::Register();
+    menu::Register();
     coop::Register();
     authority::Register();
     combat::Register();
@@ -73,6 +75,7 @@ DWORD WINAPI InitThread(LPVOID) {
     LOGF("GEngine=%p GWorld=%p", (void*)ue::GetEngine(), (void*)ue::GetWorld());
     hooks::Install("UGameEngine::Tick", es2rva::UGameEngine_Tick, (void*)&Detour_UGameEngine_Tick, (void**)&g_origTick);
     net::OnInit();
+    menu::OnInit();
     coop::OnInit();
     authority::OnInit();
     combat::OnInit();
