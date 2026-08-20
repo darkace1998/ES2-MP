@@ -2,6 +2,17 @@
 
 ## State (2026-08-20): 2-player co-op with own ships, shared combat, world state and jumps
 
+### Validation re-run (2026-08-20, fresh build): 21/21
+Rebuilt from source and redeployed, then `scripts/coop-session.sh --kill` + `verify.py --travel`:
+all 21 checks pass. Session came up clean (host ListenServer, clientConnections=1, 2 PCs each
+with a pawn; client netmode=Client in the same world). Co-op jump host->S01L01 with the client
+auto-following verified live. Screenshots in `run/shots/coop-live-*.png` show each player flying
+its own distinct ship (green Sentinel host / red interceptor client) in the same location.
+
+One harness flake fixed: the `shipdata stash` check sampled once right after connect, before the
+client's ~25 KB loadout stream (54 reliable-RPC chunks, up to ~1 min) had arrived — it now polls.
+The loadout itself was always correct (client's own ship armed locally, `applied=1`).
+
 Bring up:  `scripts/coop-session.sh --kill`   (add `--steam` to host over Steam P2P)
 Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 without `--travel`)
 
