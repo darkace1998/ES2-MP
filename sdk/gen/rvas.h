@@ -89,6 +89,7 @@ namespace es2rva {
   constexpr uint32_t UWeaponComponent_StartFire = 0x150FE78; // public: void __cdecl UWeaponComponent::StartFire(void)
   constexpr uint32_t UWeaponComponent_StopFire = 0x171760C; // public: void __cdecl UWeaponComponent::StopFire(void)
   constexpr uint32_t AESPawn_PostInitializeComponents = 0x1515EEC; // public: virtual void __cdecl AESPawn::PostInitializeComponents(void)
+  constexpr uint32_t AESPawn_PreInitializeComponents = 0x1502050; // public: virtual void __cdecl AESPawn::PreInitializeComponents(void)
   constexpr uint32_t AESPawn_BeginPlay = 0x155CB70; // protected: virtual void __cdecl AESPawn::BeginPlay(void)
   constexpr uint32_t AESPawn_UpdateShipModules = 0x5DEF910; // public: void __cdecl AESPawn::UpdateShipModules(bool)
   constexpr uint32_t FShipData_Assign = 0x1805FD8; // public: struct FShipData & __cdecl FShipData::operator=(struct FShipData const &)

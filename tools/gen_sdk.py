@@ -100,6 +100,7 @@ RVAS = {
     'UWeaponComponent_StopFire': 'public: void __cdecl UWeaponComponent::StopFire(void)',
     # ---- client-local ship materialisation ----
     'AESPawn_PostInitializeComponents': 'public: virtual void __cdecl AESPawn::PostInitializeComponents(void)',
+    'AESPawn_PreInitializeComponents': 'public: virtual void __cdecl AESPawn::PreInitializeComponents(void)',
     'AESPawn_BeginPlay': 'protected: virtual void __cdecl AESPawn::BeginPlay(void)',
     'AESPawn_UpdateShipModules': 'public: void __cdecl AESPawn::UpdateShipModules(bool)',
     'FShipData_Assign': 'public: struct FShipData & __cdecl FShipData::operator=(struct FShipData const &)',

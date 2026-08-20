@@ -34,7 +34,10 @@ static bool g_routeFire = true;      // client: forward fire intent to the host
 static bool g_localFire = true;      // client: also fire locally (muzzle flashes / feedback only)
 static uint64_t g_fireSent = 0, g_fireApplied = 0;
 static double g_healthAccum = 0;
-static float g_healthHz = 4.f;
+// Nothing gates shield regeneration on a client (UShieldComponent::TickRegeneration has no authority
+// check), so the client refills its own shield between updates. Mirror fast enough that the
+// authoritative value wins instead of the bar jittering against local regen.
+static float g_healthHz = 10.f;
 
 // ---------------------------------------------------------------- helpers
 static APlayerController* LocalPC() { return GetFirstLocalPlayerController(GetWorld()); }
@@ -53,20 +56,32 @@ static UObject* FindComponentOfClass(AActor* actor, const char* className) {
     return nullptr;
 }
 
-// Health ratio of a pawn's Health component (0..1), or -1 if unavailable.
-static float GetHealthRatio(AActor* pawn) {
-    UObject* h = FindComponentOfClass(pawn, "HealthComponent");
-    if (!h) return -1.f;
-    return UE_FIELD(float, h, es2off::UHealthComponent::HitpointRatio);
+// Hull, shield and armour are all UHitpointComponent subclasses, so HitpointRatio sits at the same
+// offset on each. -1 means "this pawn has no such component".
+static float GetRatioOf(AActor* pawn, const char* cls) {
+    UObject* c = FindComponentOfClass(pawn, cls);
+    if (!c) return -1.f;
+    return UE_FIELD(float, c, es2off::UHealthComponent::HitpointRatio);
 }
-static void SetHealthRatio(AActor* pawn, float v) {
-    UObject* h = FindComponentOfClass(pawn, "HealthComponent");
-    if (h) UE_FIELD(float, h, es2off::UHealthComponent::HitpointRatio) = v;
-}
-static float GetShieldRatio(AActor* pawn) {
-    UObject* s = FindComponentOfClass(pawn, "ShieldComponent");
-    if (!s) return -1.f;
-    return UE_FIELD(float, s, es2off::UHealthComponent::HitpointRatio);
+static float GetHealthRatio(AActor* pawn) { return GetRatioOf(pawn, "HealthComponent"); }
+static float GetShieldRatio(AActor* pawn) { return GetRatioOf(pawn, "ShieldComponent"); }
+static float GetArmorRatio(AActor* pawn)  { return GetRatioOf(pawn, "ArmorComponent"); }
+
+// Drive a hitpoint component through the engine's own setter. Writing HitpointRatio directly leaves
+// the UI stale (respawn.cpp relies on the same thing): the widgets refresh off the delegates that
+// SetCurrentHitpointsWithRatio broadcasts, and a raw field write fires none of them.
+// Note the setter does NOT run any depletion/death path — those live in TakeDamage/ChangeHitpoints —
+// so mirroring a 0.0 hull to a client empties the bar without triggering the local game-over flow.
+// The host stays the sole authority on death and respawn.
+static void ApplyRatio(AActor* pawn, const char* cls, float ratio) {
+    if (!pawn || ratio < 0.f) return;
+    UObject* c = FindComponentOfClass(pawn, cls);
+    if (!c) return;
+    float cur = UE_FIELD(float, c, es2off::UHealthComponent::HitpointRatio);
+    if (fabsf(cur - ratio) < 0.0005f) return;      // don't broadcast when nothing moved
+    UFunction* fn = FindFunction(c, "SetCurrentHitpointsWithRatio");
+    if (fn) { float r = ratio; ProcessEvent(c, fn, &r); }
+    else UE_FIELD(float, c, es2off::UHealthComponent::HitpointRatio) = ratio;
 }
 
 // ---------------------------------------------------------------- fire routing
@@ -218,11 +233,26 @@ bool OnServerOp(APlayerController* from, const std::string& op, const std::strin
 bool OnClientOp(const std::string& op, const std::string& body) {
     if (op == "WF") return ApplyNpcFire(body);
     if (op == "HP") {
-        // HP|<playerId>|<healthRatio>|<shieldRatio>  — informational for the partner's HUD/logging
-        int id = 0; float hp = 0, sh = 0;
-        if (sscanf(body.c_str(), "%d|%f|%f", &id, &hp, &sh) != 3) return true;
+        // HP|<playerId>|<hull>|<shield>|<armor>
+        // This used to skip the local player, which meant a client never saw its OWN bars move:
+        // ES2 replicates no hitpoint state and the client no-ops its own damage, so this message is
+        // the only source of truth a client has for its condition. A missing armour field (-1) or an
+        // absent component is simply skipped.
+        int id = 0; float hp = -1, sh = -1, ar = -1;
+        int n = sscanf(body.c_str(), "%d|%f|%f|%f", &id, &hp, &sh, &ar);
+        if (n < 3) return true;
         players::Player* p = players::ById(id);
-        if (p && !p->local && p->pawn) SetHealthRatio(p->pawn, hp);
+        AActor* pawn = p ? p->pawn : nullptr;
+        // The partner's slot is empty on a client (only the local slot is registered there), so fall
+        // back to the local controller's pawn when the message is about us.
+        if (!pawn && id == players::LocalId()) {
+            APlayerController* pc = LocalPC();
+            pawn = pc ? UE_FIELD(AActor*, pc, es2off::AController::Pawn) : nullptr;
+        }
+        if (!pawn || !IsValidObject((UObject*)pawn)) return true;
+        ApplyRatio(pawn, "HealthComponent", hp);
+        ApplyRatio(pawn, "ShieldComponent", sh);
+        ApplyRatio(pawn, "ArmorComponent", ar);
         return true;
     }
     return false;
@@ -236,9 +266,9 @@ void Tick(float dt, bool isHost) {
     g_healthAccum = 0;
     for (auto* p : players::All()) {
         if (!p->pawn) continue;
-        float hp = GetHealthRatio(p->pawn), sh = GetShieldRatio(p->pawn);
+        float hp = GetHealthRatio(p->pawn), sh = GetShieldRatio(p->pawn), ar = GetArmorRatio(p->pawn);
         if (hp < 0) continue;
-        coop::SendToAllClients(Format("HP|%d|%.3f|%.3f", p->id, hp, sh < 0 ? 0.f : sh));
+        coop::SendToAllClients(Format("HP|%d|%.3f|%.3f|%.3f", p->id, hp, sh, ar));
     }
 }
 

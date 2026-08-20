@@ -19,7 +19,16 @@ if [[ -z "$SAVE" ]]; then
   SAVE=$(ls -t "$SAVEDIR"/ES2__AUTO_*.sav 2>/dev/null | grep -v PREVIEW | head -1 | xargs -r basename | sed 's/\.sav$//')
   [[ -z "$SAVE" ]] && { echo "no ES2__AUTO_* save in $SAVEDIR (restore one from run/backup/SaveGames)"; exit 1; }
 fi
-[[ -f "$SAVEDIR/$SAVE.sav" ]] || { echo "save '$SAVE' not found in $SAVEDIR"; exit 1; }
+if [[ ! -f "$SAVEDIR/$SAVE.sav" ]]; then
+  # Rotation may have eaten a pinned save; restore it from the local backup if we kept one.
+  if [[ -f "$ROOT/run/backup/SaveGames/$SAVE.sav" ]]; then
+    cp -n "$ROOT/run/backup/SaveGames/$SAVE.sav" "$SAVEDIR/"
+    cp -n "$ROOT/run/backup/SaveGames/${SAVE/ES2__/ES2__PREVIEW__}.sav" "$SAVEDIR/" 2>/dev/null
+    echo "### restored '$SAVE' from run/backup/SaveGames"
+  else
+    echo "save '$SAVE' not found in $SAVEDIR (and no copy in run/backup/SaveGames)"; exit 1
+  fi
+fi
 save_world() { # save name -> location id from the PREVIEW sidecar (e.g. S01ML01)
   # The sidecar serialises as key / type / value on consecutive lines:
   #   CurrentLocation \n NameProperty \n S01ML01
