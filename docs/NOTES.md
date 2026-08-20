@@ -36,6 +36,20 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
 | Capacity | `maxplayers` (GameSession default 16; ES2 has no cap of its own) |
 
 ### Hard-won gotchas (each cost a crash or a silent failure)
+- **NPC visual desync is NOT fixed, and three approaches failed.** Measure it per-frame on ONE machine
+  (`jitter <guid> [sec]`): the host moves a scout with a worst frame 1.26x its median step, the client
+  1603 uu against a 519 uu median — 3.1x. What did not work: (a) raising `NetServerMaxTickRate` from 30
+  had no measurable effect, and bandwidth was never the limit (MaxClientRate 100000,
+  NetCullDistanceSquared 1e30); (b) hooking `AActor::PostNetReceiveLocationAndRotation` AND
+  `PostNetReceivePhysicState` caught nothing at all — UE5 applies physics replication through its own
+  physics path, not those callbacks; (c) detecting outlier steps per tick and walking the error off made
+  it strictly worse (max step 1608 -> 3099 uu), because the body keeps physics-simulating underneath and
+  the corrections stack. Untried next idea: stop client-side NPC proxies simulating physics at all and
+  drive them purely from replicated transforms.
+- **Never compare a host reading with a client reading through two console calls.** They are tens of ms
+  apart; at ~10000 uu/s that skew is worth hundreds of units, the same size as what is being measured.
+  Every cross-machine position number taken that way is noise — measure per-frame on one machine instead.
+
 - **Never aim a networked shot at a world point.** A client's copy of a moving NPC trails the host's by
   the network latency — measured 574-3100 uu at ~10000 uu/s, many ship-lengths. Firing along a ray to
   where the CLIENT saw the ship misses on the host every time, which is exactly why a client could kill a

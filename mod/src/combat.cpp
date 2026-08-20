@@ -20,6 +20,7 @@
 #include <map>
 #include <vector>
 #include <array>
+#include <algorithm>
 #include <functional>
 #include <cstring>
 
@@ -682,6 +683,58 @@ static void CmdInput(const console::Args& a, std::string& out) {
 // FNetGUIDCache a server does not normally need, so this checks whether it works host-side at all.
 // npcpos — every replicated NPC pawn with its NetGUID and position, so the same ship can be compared
 // between host and client (their UObject names differ, the guid does not).
+// jitter <guid> [seconds] — measure what the player actually sees, entirely on ONE machine.
+//
+// Comparing a host reading against a client reading is worthless here: the two console round-trips are
+// tens of milliseconds apart and at ~10000 uu/s that skew alone is worth hundreds of units, which is the
+// same order as the thing being measured. Instead sample one NPC every frame locally and look at the
+// frame-to-frame step. Smooth motion gives a steady step; a replication snap shows up as a step many
+// times the median. That is the jitter, and it needs no second machine.
+static AActor* g_jitterTarget = nullptr;
+static FVector g_jitterLast{};
+static bool g_jitterHasLast = false;
+static double g_jitterLeft = 0;
+static std::vector<double> g_jitterSteps;
+
+void JitterTick(float dt) {
+    if (g_jitterLeft <= 0 || !g_jitterTarget) return;
+    if (!IsValidObject((UObject*)g_jitterTarget)) { g_jitterLeft = 0; return; }
+    g_jitterLeft -= dt;
+    FVector p = GetActorTransform(g_jitterTarget).Translation;
+    if (g_jitterHasLast) {
+        double d = sqrt((p.X - g_jitterLast.X) * (p.X - g_jitterLast.X) +
+                        (p.Y - g_jitterLast.Y) * (p.Y - g_jitterLast.Y) +
+                        (p.Z - g_jitterLast.Z) * (p.Z - g_jitterLast.Z));
+        if (g_jitterSteps.size() < 4000) g_jitterSteps.push_back(d);
+    }
+    g_jitterLast = p;
+    g_jitterHasLast = true;
+}
+
+static void CmdJitter(const console::Args& a, std::string& out) {
+    if (a.size() > 1) {
+        uint64_t g = strtoull(a[1].c_str(), nullptr, 10);
+        AActor* t = ActorFromNetGuid(g);
+        if (!t) { out = Format("guid %llu not found here\n", (unsigned long long)g); return; }
+        g_jitterTarget = t;
+        g_jitterSteps.clear();
+        g_jitterHasLast = false;
+        g_jitterLeft = a.size() > 2 ? atof(a[2].c_str()) : 5.0;
+        out += Format("sampling %s for %.1fs\n", GetName((UObject*)t).c_str(), g_jitterLeft);
+        return;
+    }
+    if (g_jitterSteps.empty()) { out = "no samples — run: jitter <guid> [seconds]\n"; return; }
+    std::vector<double> v = g_jitterSteps;
+    std::sort(v.begin(), v.end());
+    double med = v[v.size() / 2];
+    double mx = v.back();
+    double sum = 0; for (double d : v) sum += d;
+    int snaps = 0; for (double d : v) if (med > 0.01 && d > med * 4) ++snaps;
+    out += Format("samples=%d  median step=%.1f u  mean=%.1f u  max=%.1f u  snaps(>4x median)=%d\n",
+                  (int)v.size(), med, sum / v.size(), mx, snaps);
+    out += Format("  still sampling: %s\n", g_jitterLeft > 0 ? "yes" : "no");
+}
+
 static void CmdNpcPos(const console::Args& a, std::string& out) {
     UClass* pawnClass = FindClass("ESPawn");
     if (!pawnClass) { out = "no ESPawn class\n"; return; }
@@ -907,8 +960,10 @@ void Register() {
     console::Register("input", "input <nextprimary|prevprimary|nextsecondary|travel on/off|cruise on/off> - press a real input handler (test aid)", CmdInput);
     console::Register("combat", "combat [route 0/1|localfire 0/1|hphz N] - fire-routing status and player health", CmdCombat);
     console::Register("locktest", "locktest <playerId> <targetGuid> - set+read a lock in one call", CmdLockTest);
+    console::Register("jitter", "jitter <guid> [sec] - per-frame motion steps of one NPC on THIS machine", CmdJitter);
     console::Register("npcpos", "npcpos [max] - NPC pawn positions keyed by NetGUID", CmdNpcPos);
     console::Register("guid", "guid <n> - resolve a NetGUID to an actor on this machine", CmdGuid);
+    console::RegisterTick("jitter", JitterTick);
     console::Register("aiminfo", "aiminfo [npc] - weapon FocusLocation per player, or per NPC keyed by NetGUID", CmdAimInfo);
     console::Register("hp", "hp [Class] - health/shield ratios of pawns in the world", CmdHp);
     console::Register("lock", "lock [playerId] - acquire closest target (host: on that player's server-side pawn)", CmdLock);
