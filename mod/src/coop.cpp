@@ -12,6 +12,7 @@
 #include "hooks.h"
 #include "combat.h"
 #include "loadout.h"
+#include "travel.h"
 #include <windows.h>
 #include <cmath>
 #include <cstring>
@@ -231,6 +232,7 @@ bool OnServerMessage(APlayerController* fromPC, const std::string& raw) {
     if (op == "SAY") { LOGF("[coop] say(client): %s", body.c_str()); SendToAllClients("SAY|" + body); return true; }
     if (combat::OnServerOp(fromPC, op, body)) return true;
     if (loadout::OnServerOp(fromPC, op, body)) return true;
+    if (travel::OnServerOp(fromPC, op, body)) return true;
     LOGF("[coop] unhandled client op '%s'", op.c_str());
     return true;
 }
@@ -268,6 +270,7 @@ bool OnClientMessage(APlayerController* toPC, const std::string& raw) {
     if (op == "SAY") { LOGF("[coop] say(host): %s", body.c_str()); return true; }
     if (combat::OnClientOp(op, body)) return true;
     if (loadout::OnClientOp(op, body)) return true;
+    if (travel::OnClientOp(op, body)) return true;
     LOGF("[coop] unhandled host op '%s'", op.c_str());
     return true;
 }
@@ -286,7 +289,7 @@ static void OnRoleChanged(Role r) {
     players::Reset();
     loadout::ResetSession();
     g_helloSent = false; g_welcomed = false; g_helloAccum = 0;
-    if (r != Role::None) ApplyNoPause();
+    if (r != Role::None) { ApplyNoPause(); travel::ApplyOriginShiftPolicy(true); }
     if (r == Role::Host) {
         players::SetLocalId(0);
         APlayerController* pc = GetFirstLocalPlayerController(GetWorld());
@@ -310,9 +313,11 @@ static void Tick(float dt) {
             APlayerController* pc = GetFirstLocalPlayerController(w);
             if (pc) players::RegisterController(pc);
         }
+        if (r != Role::None) travel::ApplyOriginShiftPolicy(true);
         LOGF("[coop] world -> %s (role %s)", WorldName(w).c_str(), RoleName(r));
     }
     if (r != g_role) { g_role = r; OnRoleChanged(r); }
+    travel::Tick(dt, r == Role::Host);
     if (r == Role::None) return;
     players::Refresh();
     if (r == Role::Host) {

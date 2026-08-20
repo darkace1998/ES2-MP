@@ -400,12 +400,26 @@ namespace es2off {
   }
   namespace UESGameInstance {
     constexpr uint32_t __size = 4448;
+    constexpr uint32_t bUseWorldOriginShifting = 0x214; // bool (size 1) from UESGameInstance
+    constexpr uint32_t WorldOriginShiftingStack = 0x1150; // int (size 4) from UESGameInstance
   }
   namespace UPlayerData {
     constexpr uint32_t __size = 8624;
     constexpr uint32_t Ships = 0x468; // TArray<FShipData,TSizedDefaultAllocator<32> > (size 16) from UPlayerData
     constexpr uint32_t ShipsSaveState = 0x478; // TArray<FShipDataState,TSizedDefaultAllocator<32> > (size 16) from UPlayerData
     constexpr uint32_t CurrentShip = 0x119C; // int (size 4) from UPlayerData
+  }
+  namespace UGameData {
+    constexpr uint32_t __size = 1120;
+    constexpr uint32_t Locations = 0x168; // TArray<FLocationData,TSizedDefaultAllocator<32> > (size 16) from UGameData
+  }
+  namespace FLocationData {
+    constexpr uint32_t __size = 448;
+    constexpr uint32_t Name = 0x0; // FText (size 16) from FLocationData
+    constexpr uint32_t LocationID = 0x30; // FName (size 8) from FLocationData
+    constexpr uint32_t SystemID = 0x3C; // FName (size 8) from FLocationData
+    constexpr uint32_t MapAssetString = 0x48; // FString (size 16) from FLocationData
+    constexpr uint32_t bNeverShowIngame = 0x38; // bool (size 1) from FLocationData
   }
   namespace UItem {
     constexpr uint32_t __size = 632;

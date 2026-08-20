@@ -5,6 +5,7 @@
 #include "hooks.h"
 #include "coop.h"
 #include "loadout.h"
+#include "travel.h"
 #include "players.h"
 #include <windows.h>
 #include <cstdlib>
@@ -208,6 +209,7 @@ static void CmdListen(const console::Args& a, std::string& out) {
     UGameInstance* gi = GetGameInstance();
     if (!gi) { out = "no game instance\n"; return; }
     ApplyNetDriverMode(g_netDriverMode, out);
+    travel::SetListenPort(port);
     bool ok = Rva<std::remove_pointer_t<Fn_EnableListenServer>>(es2rva::UGameInstance_EnableListenServer)(gi, true, port);
     UWorld* w = GetWorld();
     out += Format("EnableListenServer(port %d) -> %d; netmode now %s, netdriver=%s\n", port, (int)ok, NetModeName(GetNetMode(w)), GetFullName((UObject*)GetNetDriver(w)).c_str());
@@ -217,6 +219,7 @@ static void CmdConnect(const console::Args& a, std::string& out) {
     std::string addr = a[1];
     if (addr.find(':') == std::string::npos && addr.rfind("steam.", 0) != 0) addr += ":7777";
     ApplyNetDriverMode(addr.rfind("steam.", 0) == 0 ? "steam" : g_netDriverMode, out);
+    travel::SetHostAddress(addr);
     ExecConsoleCommand("open " + addr);
     out += "issued: open " + addr + "\n";
 }

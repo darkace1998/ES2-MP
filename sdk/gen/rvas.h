@@ -82,6 +82,12 @@ namespace es2rva {
   constexpr uint32_t AActor_GetVelocity = 0x11F2A78; // public: virtual struct UE::Math::TVector<double> __cdecl AActor::GetVelocity(void) const
   constexpr uint32_t AActor_TeleportTo = 0x16AA728; // public: virtual bool __cdecl AActor::TeleportTo(struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, bool, bool)
   constexpr uint32_t UEngine_GetGameUserSettings = 0x137F928; // public: class UGameUserSettings * __cdecl UEngine::GetGameUserSettings(void)
+  constexpr uint32_t UESGameInstance_SetWorldOriginShifting = 0x5DEB784; // public: void __cdecl UESGameInstance::SetWorldOriginShifting(bool)
+  constexpr uint32_t UMapLib_GetCurrentLocationData = 0x1273E9C; // public: static struct FLocationData const & __cdecl UMapLib::GetCurrentLocationData(class UObject const *)
+  constexpr uint32_t UMapLib_GetLocationData = 0x145A35C; // public: static struct FLocationData const & __cdecl UMapLib::GetLocationData(class FName const &)
+  constexpr uint32_t UGameplayLib_ChangeLocation = 0x5E21E28; // public: static void __cdecl UGameplayLib::ChangeLocation(class UObject *, struct FLocationData const &, struct FLocationData const &, bool, bool)
+  constexpr uint32_t UGameData_GetSingleton = 0x121C118; // public: static class UGameData & __cdecl UGameData::GetSingleton(void)
+  constexpr uint32_t UGameplayLib_ESOpenLevel = 0x5E26144; // public: static void __cdecl UGameplayLib::ESOpenLevel(class UObject const *, class FName, bool, class FString)
   constexpr uint32_t UESGameInstance_PushPause = 0x5DE7B08; // public: static void __cdecl UESGameInstance::PushPause(void)
   constexpr uint32_t UESGameInstance_PopPause = 0x5DE76A8; // public: static void __cdecl UESGameInstance::PopPause(void)
   constexpr uint32_t AESPawn_PostInitializeComponents = 0x1515EEC; // public: virtual void __cdecl AESPawn::PostInitializeComponents(void)
