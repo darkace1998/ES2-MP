@@ -347,6 +347,8 @@ static void Tick(float dt) {
         if (g_sendAccum >= 1.0 / g_sendHz) { g_sendAccum = 0; SendLocalTransform(); }
         SmoothRemotePawns(dt);   // other players' ships, fed by the host's PT relay
         if (g_welcomed) { loadout::MaybeSendOnJoin(); loadout::ClientTick(dt); }
+        loadout::ClientLocalShipTick();
+        loadout::ClientBuildWeaponsTick();
         world_state::Tick(dt, false);
     }
 }

@@ -40,6 +40,14 @@ using Fn_DestroyStruct    = void (*)(UObject* scriptStruct, void* dest, int arra
 using Fn_ExportText       = void (*)(UObject* scriptStruct, FString* out, const void* value, const void* defaults, UObject* owner, int portFlags, UObject* exportRootScope, bool allowNativeOverride);
 using Fn_ImportText       = const wchar_t* (*)(UObject* scriptStruct, const wchar_t* buffer, void* value, UObject* owner, int portFlags, void* errorText, const FString* structName, bool allowNativeOverride);
 using Fn_Void             = void (*)();
+using Fn_ShipDataAssign   = void* (*)(void* dstShipData, const void* srcShipData);
+using Fn_UpdateShipModules= void (*)(AActor* pawn, bool respawnWeapons);
+using Fn_ReinitShip       = void (*)();
+using Fn_PawnVoid         = void (*)(AActor* pawn);
+using Fn_CreateWeaponInfo = void (*)(UObject* item, void* outWeaponInfo);
+using Fn_SpawnWeapons     = void (*)(UObject* weaponComponent);
+using Fn_EquipWeapon      = void (*)(UObject* weaponComponent, int slot, bool a, bool b, bool c);
+using Fn_WeaponInfoCtor   = void* (*)(void* weaponInfo);
 
 static Fn_GetCurrentShip o_GetCurrentShip = nullptr;
 
@@ -177,6 +185,187 @@ void EndSubstitution() {
 void StashForPlayer(int playerId, const std::string& text) {
     g_stash[playerId] = text;
     LOGF("[loadout] stashed ship for player %d (%zu chars)", playerId, text.size());
+}
+
+// ---------------------------------------------------------------- client-local ship
+//
+// AESPawn::ShipData does not replicate. The host builds the client's server-side pawn correctly (that is
+// what the loadout substitution is for), but the client's LOCAL copy of its own ship arrives through the
+// actor channel with a default, empty FShipData — no weapons, no modules, nothing for the equipment UI
+// to show. The client already owns the right data in its own UPlayerData, so materialising it locally
+// costs nothing and is purely cosmetic/local: it is what makes the client able to see its guns fire and
+// to open its ship/equipment screens.
+static uint64_t g_localApplied = 0;
+static bool g_autoLocalShip = true;
+static Fn_PawnVoid o_BeginPlay = nullptr;
+static uint64_t g_preBeginPlay = 0;
+
+// Copy this machine's own current ship into a pawn's FShipData. Returns false if we have no ship.
+static bool CopyOwnShipInto(AActor* pawn) {
+    UObject* sdStruct = Rva<std::remove_pointer_t<Fn_StaticStruct>>(es2rva::FShipData_StaticStruct)();
+    if (!sdStruct || !pawn) return false;
+    std::vector<uint8_t> ship(kShipDataSize + 32, 0);
+    void* tmp = ship.data();
+    if (o_GetCurrentShip) o_GetCurrentShip(tmp);
+    else Rva<std::remove_pointer_t<Fn_GetCurrentShip>>(es2rva::UInventoryLib_GetCurrentShip)(tmp);
+    bool ok = UE_FIELD(UObject*, tmp, es2off::FShipData::ShipItemInstance) != nullptr;
+    if (ok) {
+        void* dst = reinterpret_cast<char*>(pawn) + es2off::AESPawn::ShipData;
+        Rva<std::remove_pointer_t<Fn_ShipDataAssign>>(es2rva::FShipData_Assign)(dst, tmp);
+    }
+    DestroyStructAt(sdStruct, tmp);
+    return ok;
+}
+
+// THE fix for "the client cannot shoot / cannot equip": a replicated pawn arrives with an empty
+// FShipData (ES2 never replicates it), and by the time BeginPlay has run the ship has already built
+// itself as an unarmed default. Filling ShipData *before* the original BeginPlay lets the vanilla setup
+// build the real weapons, modules and equipment from the client's own save.
+static void H_BeginPlay(AActor* pawn) {
+    if (pawn && coop::CurrentRole() == coop::Role::Client && g_autoLocalShip) {
+        uint8_t role = UE_FIELD(uint8_t, pawn, es2off::AActor::Role);
+        void* sd = reinterpret_cast<char*>(pawn) + es2off::AESPawn::ShipData;
+        bool empty = UE_FIELD(UObject*, sd, es2off::FShipData::ShipItemInstance) == nullptr;
+        if (role == 2 /*ROLE_AutonomousProxy = our own ship*/ && empty) {
+            if (CopyOwnShipInto(pawn)) {
+                ++g_preBeginPlay;
+                LOGF("[loadout] filled our own ShipData on %s before BeginPlay", GetName((UObject*)pawn).c_str());
+            }
+        }
+    }
+    o_BeginPlay(pawn);
+}
+
+static bool LocalShipIsEmpty(AActor* pawn) {
+    if (!pawn) return false;
+    void* sd = reinterpret_cast<char*>(pawn) + es2off::AESPawn::ShipData;
+    return UE_FIELD(UObject*, sd, es2off::FShipData::ShipItemInstance) == nullptr;
+}
+
+bool ApplyOwnShipLocally(AActor* pawn, std::string& err) {
+    if (!pawn || !IsValidObject((UObject*)pawn)) { err = "no pawn"; return false; }
+    UObject* sdStruct = Rva<std::remove_pointer_t<Fn_StaticStruct>>(es2rva::FShipData_StaticStruct)();
+    if (!sdStruct) { err = "no FShipData struct"; return false; }
+
+    std::vector<uint8_t> ship(kShipDataSize + 32, 0);
+    void* tmp = ship.data();
+    if (o_GetCurrentShip) o_GetCurrentShip(tmp);                       // constructs into tmp; we own it
+    else Rva<std::remove_pointer_t<Fn_GetCurrentShip>>(es2rva::UInventoryLib_GetCurrentShip)(tmp);
+
+    if (UE_FIELD(UObject*, tmp, es2off::FShipData::ShipItemInstance) == nullptr) {
+        DestroyStructAt(sdStruct, tmp);
+        err = "this machine's UPlayerData has no current ship";
+        return false;
+    }
+    void* dst = reinterpret_cast<char*>(pawn) + es2off::AESPawn::ShipData;
+    Rva<std::remove_pointer_t<Fn_ShipDataAssign>>(es2rva::FShipData_Assign)(dst, tmp);   // deep copy
+    DestroyStructAt(sdStruct, tmp);
+
+    // ...and make the pawn actually build itself from it. UpdateShipModules(true) rebuilds the modules
+    // and respawns the weapon ACTORS, but the weapon SLOTS (FWeaponInfo::WeaponItem) are filled from the
+    // ship's inventory by ReinitShipAfterPotentialChanges, which resolves the local UPlayerData and
+    // GetPlayerPawn(0) — on a client that is exactly this pawn.
+    Rva<std::remove_pointer_t<Fn_UpdateShipModules>>(es2rva::AESPawn_UpdateShipModules)(pawn, true);
+    Rva<std::remove_pointer_t<Fn_ReinitShip>>(es2rva::UInventoryLib_ReinitShipAfterPotentialChanges)();
+    Rva<std::remove_pointer_t<Fn_UpdateShipModules>>(es2rva::AESPawn_UpdateShipModules)(pawn, true);
+    ++g_localApplied;
+    LOGF("[loadout] materialised our own ship on the local pawn %s", GetName((UObject*)pawn).c_str());
+    return true;
+}
+
+// The vanilla "build my ship from ShipData" path is authority-gated, so on a client nothing fills
+// UWeaponComponent::WeaponSlots. Do it explicitly from the ship's own inventory: each slot's FWeaponInfo
+// is built from the corresponding UItem, then the component spawns the weapon actors.
+static constexpr size_t kWeaponInfoSize = 80;    // sizeof(FWeaponInfo), from the PDB
+struct RawPtrArray { UObject** Data; int32_t Num; int32_t Max; };
+
+int BuildWeaponsLocally(AActor* pawn, std::string& log) {
+    if (!pawn || !IsValidObject((UObject*)pawn)) { log += "no pawn\n"; return 0; }
+    UObject* inv = UE_FIELD(UObject*, reinterpret_cast<char*>(pawn) + es2off::AESPawn::ShipData, es2off::FShipData::Inventory);
+    if (!inv || !IsValidObject(inv)) { log += "pawn has no ship inventory\n"; return 0; }
+
+    struct Slot { const char* prop; uint32_t invOff; } kinds[2] = {
+        {"PrimaryWeapons",   es2off::UInventory::PrimaryWeapons},
+        {"SecondaryWeapons", es2off::UInventory::SecondaryWeapons},
+    };
+    int filled = 0;
+    for (auto& k : kinds) {
+        UObject* wc = nullptr;
+        for (auto& p : GetProperties((UStruct*)GetClass((UObject*)pawn), true))
+            if (p.Name == k.prop) { wc = UE_FIELD(UObject*, pawn, p.Offset); break; }
+        if (!wc || !IsValidObject(wc)) { log += Format("%s: no component\n", k.prop); continue; }
+
+        RawPtrArray& items = UE_FIELD(RawPtrArray, inv, k.invOff);
+        struct RawArr { char* Data; int32_t Num; int32_t Max; };
+        RawArr& slots = UE_FIELD(RawArr, wc, es2off::UWeaponComponent::WeaponSlots);
+        RawPtrArray& sockets = UE_FIELD(RawPtrArray, wc, es2off::UWeaponComponent::WeaponSockets);
+        log += Format("%s: %d slot(s), %d socket(s), %d item(s) in inventory\n", k.prop, slots.Num, sockets.Num, items.Num);
+        if (!items.Data || items.Num <= 0) continue;
+
+        // The client's secondary component often arrives with sockets but ZERO slots, because the array is
+        // sized by the authority-only setup. Grow it here: FWeaponInfo is non-POD (soft class ptr, arrays),
+        // so every element must be default-constructed, not memset.
+        if (slots.Num <= 0 && sockets.Num > 0) {
+            int want = sockets.Num < items.Num ? sockets.Num : items.Num;
+            void* mem = Malloc(kWeaponInfoSize * want, 0);
+            if (mem) {
+                memset(mem, 0, kWeaponInfoSize * want);
+                for (int i = 0; i < want; ++i)
+                    Rva<std::remove_pointer_t<Fn_WeaponInfoCtor>>(es2rva::FWeaponInfo_Ctor)(reinterpret_cast<char*>(mem) + (size_t)i * kWeaponInfoSize);
+                slots.Data = reinterpret_cast<char*>(mem);
+                slots.Num = want;
+                slots.Max = want;
+                log += Format("  grew %s to %d slot(s)\n", k.prop, want);
+            }
+        }
+        if (!slots.Data || slots.Num <= 0) continue;
+
+        int n = slots.Num < items.Num ? slots.Num : items.Num;
+        for (int i = 0; i < n; ++i) {
+            UObject* item = items.Data[i];
+            if (!item || !IsValidObject(item)) continue;
+            void* slot = slots.Data + (size_t)i * kWeaponInfoSize;
+            Rva<std::remove_pointer_t<Fn_CreateWeaponInfo>>(es2rva::UWeaponComponent_CreateWeaponInfoFromItem)(item, slot);
+            ++filled;
+            log += Format("  slot %d <- %s\n", i, UE_FIELD(FName, item, es2off::UItem::ItemTemplateID).ToString().c_str());
+        }
+        Rva<std::remove_pointer_t<Fn_SpawnWeapons>>(es2rva::UWeaponComponent_SpawnWeapons)(wc);
+    }
+    return filled;
+}
+
+void ClientLocalShipTick() {
+    if (!g_autoLocalShip) return;
+    APlayerController* pc = GetFirstLocalPlayerController(GetWorld());
+    AActor* pawn = pc ? UE_FIELD(AActor*, pc, es2off::AController::Pawn) : nullptr;
+    if (!pawn) return;
+    UClass* esPawn = FindClass("/Script/ES2.ESPawn");
+    if (!esPawn || !IsA((UObject*)pawn, esPawn)) return;
+    if (!LocalShipIsEmpty(pawn)) return;
+    std::string err;
+    if (!ApplyOwnShipLocally(pawn, err)) {
+        static int warned = 0;
+        if (warned++ < 5) LOGF("[loadout] could not materialise local ship: %s", err.c_str());
+    }
+}
+
+// Even with ShipData in place the client's weapon slots stay empty (the vanilla build is authority-gated),
+// so build them explicitly once per pawn.
+static AActor* g_builtFor = nullptr;
+void ClientBuildWeaponsTick() {
+    if (!g_autoLocalShip) return;
+    if (coop::CurrentRole() != coop::Role::Client) return;
+    APlayerController* pc = GetFirstLocalPlayerController(GetWorld());
+    AActor* pawn = pc ? UE_FIELD(AActor*, pc, es2off::AController::Pawn) : nullptr;
+    if (!pawn || pawn == g_builtFor) return;
+    UClass* esPawn = FindClass("/Script/ES2.ESPawn");
+    if (!esPawn || !IsA((UObject*)pawn, esPawn)) return;
+    UObject* inv = UE_FIELD(UObject*, reinterpret_cast<char*>(pawn) + es2off::AESPawn::ShipData, es2off::FShipData::Inventory);
+    if (!inv || !IsValidObject(inv)) return;          // ship data not materialised yet
+    std::string log;
+    int n = BuildWeaponsLocally(pawn, log);
+    g_builtFor = pawn;
+    LOGF("[loadout] built %d local weapon slot(s) on %s\n%s", n, GetName((UObject*)pawn).c_str(), log.c_str());
 }
 
 // ---------------------------------------------------------------- transport
@@ -333,6 +522,15 @@ static void CmdShipData(const console::Args& a, std::string& out) {
         }
     } else if (sub == "send") {
         StartSend(); out += "queued\n";
+    } else if (sub == "local") {
+        APlayerController* pc = GetFirstLocalPlayerController(GetWorld());
+        AActor* pawn = pc ? UE_FIELD(AActor*, pc, es2off::AController::Pawn) : nullptr;
+        std::string err;
+        if (a.size() > 2 && a[2] == "auto") { g_autoLocalShip = a.size() > 3 ? a[3] == "1" : true; }
+        else if (a.size() > 2 && a[2] == "build") { std::string log; int n = BuildWeaponsLocally(pawn, log); out += log + Format("filled %d slot(s)\n", n); }
+        else out += ApplyOwnShipLocally(pawn, err) ? "applied our own ship to the local pawn\n" : ("failed: " + err + "\n");
+        out += Format("autoLocalShip=%d applied=%llu preBeginPlay=%llu localShipEmpty=%d\n", (int)g_autoLocalShip,
+                      (unsigned long long)g_localApplied, (unsigned long long)g_preBeginPlay, (int)LocalShipIsEmpty(pawn));
     } else if (sub == "stash") {
         for (auto& [id, s] : g_stash) out += Format("  player %d: %zu chars applied=%d\n", id, s.size(), (int)g_applied[id]);
         if (g_stash.empty()) out += "  (none)\n";
@@ -384,6 +582,7 @@ void Register() {
 
 void OnInit() {
     hooks::Install("UInventoryLib::GetCurrentShip", es2rva::UInventoryLib_GetCurrentShip, (void*)&H_GetCurrentShip, (void**)&o_GetCurrentShip);
+    hooks::Install("AESPawn::BeginPlay", es2rva::AESPawn_BeginPlay, (void*)&H_BeginPlay, (void**)&o_BeginPlay);
 }
 
 // client: send our ship once we are connected and flying

@@ -21,4 +21,8 @@ void ClientTick(float dt);
 void HostTick(float dt);
 void MaybeSendOnJoin();
 void ResetSession();
+void ClientLocalShipTick();
+void ClientBuildWeaponsTick();
+bool ApplyOwnShipLocally(ue::AActor* pawn, std::string& err);
+int BuildWeaponsLocally(ue::AActor* pawn, std::string& log);
 }

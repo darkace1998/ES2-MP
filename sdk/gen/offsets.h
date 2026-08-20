@@ -497,6 +497,22 @@ namespace es2off {
   namespace UWeaponComponent {
     constexpr uint32_t __size = 2512;
     constexpr uint32_t WeaponSlots = 0x238; // TArray<FWeaponInfo,TSizedDefaultAllocator<32> > (size 16) from UWeaponComponent
+    constexpr uint32_t WeaponSockets = 0x258; // TArray<FName,TSizedDefaultAllocator<32> > (size 16) from UWeaponComponent
+    constexpr uint32_t WeaponCategory = 0x230; // TEnumAsByte<enum EWeaponCategory::Type> (size 1) from UWeaponComponent
+  }
+  namespace UInventory {
+    constexpr uint32_t __size = 240;
+    constexpr uint32_t PrimaryWeapons = 0x38; // TArray<UItem *,TSizedDefaultAllocator<32> > (size 16) from UInventory
+    constexpr uint32_t SecondaryWeapons = 0x48; // TArray<UItem *,TSizedDefaultAllocator<32> > (size 16) from UInventory
+    constexpr uint32_t EnergyCores = 0x58; // TArray<UItem *,TSizedDefaultAllocator<32> > (size 16) from UInventory
+    constexpr uint32_t Sensors = 0x68; // TArray<UItem *,TSizedDefaultAllocator<32> > (size 16) from UInventory
+    constexpr uint32_t Shields = 0x78; // TArray<UItem *,TSizedDefaultAllocator<32> > (size 16) from UInventory
+    constexpr uint32_t CargoUnits = 0x88; // TArray<UItem *,TSizedDefaultAllocator<32> > (size 16) from UInventory
+    constexpr uint32_t Platings = 0x98; // TArray<UItem *,TSizedDefaultAllocator<32> > (size 16) from UInventory
+    constexpr uint32_t Thrusters = 0xA8; // TArray<UItem *,TSizedDefaultAllocator<32> > (size 16) from UInventory
+    constexpr uint32_t Devices = 0xB8; // TArray<UItem *,TSizedDefaultAllocator<32> > (size 16) from UInventory
+    constexpr uint32_t Consumables = 0xC8; // TArray<UItem *,TSizedDefaultAllocator<32> > (size 16) from UInventory
+    constexpr uint32_t Cargo = 0xD8; // TArray<UItem *,TSizedDefaultAllocator<32> > (size 16) from UInventory
   }
   namespace FShipData {
     constexpr uint32_t __size = 976;

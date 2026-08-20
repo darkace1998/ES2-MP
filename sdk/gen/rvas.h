@@ -82,6 +82,14 @@ namespace es2rva {
   constexpr uint32_t AActor_GetVelocity = 0x11F2A78; // public: virtual struct UE::Math::TVector<double> __cdecl AActor::GetVelocity(void) const
   constexpr uint32_t AActor_TeleportTo = 0x16AA728; // public: virtual bool __cdecl AActor::TeleportTo(struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, bool, bool)
   constexpr uint32_t UEngine_GetGameUserSettings = 0x137F928; // public: class UGameUserSettings * __cdecl UEngine::GetGameUserSettings(void)
+  constexpr uint32_t AESPawn_BeginPlay = 0x155CB70; // protected: virtual void __cdecl AESPawn::BeginPlay(void)
+  constexpr uint32_t AESPawn_UpdateShipModules = 0x5DEF910; // public: void __cdecl AESPawn::UpdateShipModules(bool)
+  constexpr uint32_t FShipData_Assign = 0x1805FD8; // public: struct FShipData & __cdecl FShipData::operator=(struct FShipData const &)
+  constexpr uint32_t UInventoryLib_ReinitShipAfterPotentialChanges = 0x178F6DC; // public: static void __cdecl UInventoryLib::ReinitShipAfterPotentialChanges(void)
+  constexpr uint32_t FWeaponInfo_Ctor = 0x179093C; // public: __cdecl FWeaponInfo::FWeaponInfo(void)
+  constexpr uint32_t UWeaponComponent_CreateWeaponInfoFromItem = 0x150337C; // public: static void __cdecl UWeaponComponent::CreateWeaponInfoFromItem(class UItem *, struct FWeaponInfo &)
+  constexpr uint32_t UWeaponComponent_EquipWeapon = 0x1519154; // public: void __cdecl UWeaponComponent::EquipWeapon(int, bool, bool, bool)
+  constexpr uint32_t UWeaponComponent_SpawnWeapons = 0x131FA98; // public: void __cdecl UWeaponComponent::SpawnWeapons(void)
   constexpr uint32_t FOnlineFactorySteam_SteamSingleton = 0x9B38338; // private: static class TSharedPtr<class FOnlineSubsystemSteam, 1> FOnlineFactorySteam::SteamSingleton
   constexpr uint32_t FSocketSubsystemSteam_SocketSingleton = 0x9E62260; // protected: static class FSocketSubsystemSteam *FSocketSubsystemSteam::SocketSingleton
   constexpr uint32_t FOnlineSessionSteam_GetNumSessions = 0x52AF31C; // public: virtual int __cdecl FOnlineSessionSteam::GetNumSessions(void)

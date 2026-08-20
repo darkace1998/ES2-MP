@@ -91,6 +91,15 @@ RVAS = {
     'AActor_GetVelocity': 'public: virtual struct UE::Math::TVector<double> __cdecl AActor::GetVelocity(void) const',
     'AActor_TeleportTo': 'public: virtual bool __cdecl AActor::TeleportTo(struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, bool, bool)',
     'UEngine_GetGameUserSettings': 'public: class UGameUserSettings * __cdecl UEngine::GetGameUserSettings(void)',
+    # ---- client-local ship materialisation ----
+    'AESPawn_BeginPlay': 'protected: virtual void __cdecl AESPawn::BeginPlay(void)',
+    'AESPawn_UpdateShipModules': 'public: void __cdecl AESPawn::UpdateShipModules(bool)',
+    'FShipData_Assign': 'public: struct FShipData & __cdecl FShipData::operator=(struct FShipData const &)',
+    'UInventoryLib_ReinitShipAfterPotentialChanges': 'public: static void __cdecl UInventoryLib::ReinitShipAfterPotentialChanges(void)',
+    'FWeaponInfo_Ctor': 'regex:^public: __cdecl FWeaponInfo::FWeaponInfo\\(void\\)$',
+    'UWeaponComponent_CreateWeaponInfoFromItem': 'public: static void __cdecl UWeaponComponent::CreateWeaponInfoFromItem(class UItem *, struct FWeaponInfo &)',
+    'UWeaponComponent_EquipWeapon': 'public: void __cdecl UWeaponComponent::EquipWeapon(int, bool, bool, bool)',
+    'UWeaponComponent_SpawnWeapons': 'public: void __cdecl UWeaponComponent::SpawnWeapons(void)',
     # ---- steam p2p ----
     'FOnlineFactorySteam_SteamSingleton': 'private: static class TSharedPtr<class FOnlineSubsystemSteam, 1> FOnlineFactorySteam::SteamSingleton',
     'FSocketSubsystemSteam_SocketSingleton': 'protected: static class FSocketSubsystemSteam *FSocketSubsystemSteam::SocketSingleton',
@@ -223,7 +232,8 @@ OFFSETS = {
     'APickupBase': ['PickupEntry'],
     'FPickupEntry': ['PickupClassPath', 'PickupInventory'],
     'FWeaponInfo': ['WeaponItem', 'WeaponClass', 'SpawnedWeapons'],
-    'UWeaponComponent': ['WeaponSlots'],
+    'UWeaponComponent': ['WeaponSlots', 'WeaponSockets', 'WeaponCategory'],
+    'UInventory': ['PrimaryWeapons', 'SecondaryWeapons', 'EnergyCores', 'Sensors', 'Shields', 'CargoUnits', 'Platings', 'Thrusters', 'Devices', 'Consumables', 'Cargo'],
     'FShipData': ['Name', 'Inventory', 'ShipItemInstance', 'UltimateDevice'],
     'UShipMovementComponent': [],
 }
