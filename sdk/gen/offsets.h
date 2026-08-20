@@ -126,6 +126,22 @@ namespace es2off {
     constexpr uint32_t CppForm = 0x50; // UEnum::ECppForm (size 1) from UEnum
     constexpr uint32_t EnumFlags = 0x51; // EEnumFlags (size 1) from UEnum
   }
+  namespace UPanelWidget {
+    constexpr uint32_t __size = 384;
+    constexpr uint32_t Slots = 0x168; // TArray<TObjectPtr<UPanelSlot>,TSizedDefaultAllocator<32> > (size 16) from UPanelWidget
+  }
+  namespace UPanelSlot {
+    constexpr uint32_t __size = 56;
+    constexpr uint32_t Parent = 0x28; // TObjectPtr<UPanelWidget> (size 8) from UPanelSlot
+    constexpr uint32_t Content = 0x30; // TObjectPtr<UWidget> (size 8) from UPanelSlot
+  }
+  namespace UVerticalBoxSlot {
+    constexpr uint32_t __size = 96;
+    constexpr uint32_t Size = 0x38; // FSlateChildSize (size 8) from UVerticalBoxSlot
+    constexpr uint32_t Padding = 0x40; // FMargin (size 16) from UVerticalBoxSlot
+    constexpr uint32_t HorizontalAlignment = 0x50; // TEnumAsByte<enum EHorizontalAlignment> (size 1) from UVerticalBoxSlot
+    constexpr uint32_t VerticalAlignment = 0x51; // TEnumAsByte<enum EVerticalAlignment> (size 1) from UVerticalBoxSlot
+  }
   namespace UEngine {
     constexpr uint32_t __size = 4592;
     constexpr uint32_t GameViewport = 0xBD0; // TObjectPtr<UGameViewportClient> (size 8) from UEngine

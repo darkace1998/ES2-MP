@@ -19,6 +19,7 @@
 #include <windows.h>
 #include <string>
 #include <vector>
+#include <cstring>
 
 using namespace ue;
 using es2coop::Format;
@@ -47,6 +48,10 @@ static bool g_trace = false;      // log every Blueprint call landing on our wid
 // Taken at face value that armed hosting and threw the Steam overlay up the moment the menu appeared,
 // so ignore activations until the menu has settled.
 static double g_settle = 0;
+// Our own SetText/SetVisibility calls re-enter the button's Blueprint, which fires OnBtnClicked again.
+// Without this the toggle flipped twice per press and settled back where it started.
+static bool g_selfUpdate = false;
+struct SelfUpdate { SelfUpdate() { g_selfUpdate = true; } ~SelfUpdate() { g_selfUpdate = false; } };
 static bool Settled() { return g_settle <= 0; }
 static uint64_t g_clicks = 0;
 static double g_accum = 0;
@@ -102,6 +107,7 @@ static void SetButtonText(UObject* button, const std::string& text) {
     if (!button) return;
     UFunction* fn = FindFunction(button, "SetText");
     if (!fn) return;
+    SelfUpdate guard;
     FString s(text);
     struct { uint8_t Text[16]; } parms{};      // FText is 16 bytes
     Rva<std::remove_pointer_t<Fn_TextFromStr>>(es2rva::FText_FromString)(&parms, &s);
@@ -111,33 +117,32 @@ static void SetButtonText(UObject* button, const std::string& text) {
 // ---------------------------------------------------------------- the lobby readout
 // The menu's VerticalBox has no room to spare (a second row pushed the DLC entry off the panel), and
 // UPanelWidget offers no InsertChildAt, so the entry doubles as its own status line.
+static bool LobbyVisible();
 static std::string LobbyLine() {
-    if (!g_pendingJoin.empty() && coop::CurrentRole() == coop::Role::None) return "MULTIPLAYER  -  JOINING A FRIEND";
-    if (g_armHost && coop::CurrentRole() == coop::Role::None) return "MULTIPLAYER  -  HOSTING NEXT GAME";
-    switch (coop::CurrentRole()) {
-        case coop::Role::Host: {
-            int n = players::Count();
-            return Format("MULTIPLAYER  -  HOSTING (%d/4)", n < 1 ? 1 : n);
-        }
-        case coop::Role::Client:
-            return "MULTIPLAYER  -  CONNECTED";
-        default:
-            return "MULTIPLAYER";
-    }
+    // Just the state — who is in the lobby is what the overview on the right is for.
+    return LobbyVisible() ? "MULTIPLAYER:  ON" : "MULTIPLAYER:  OFF";
 }
 
 // ---------------------------------------------------------------- click handling
+// The entry is a toggle: OFF leaves the game exactly as stock, ON means the next map the player loads
+// comes up hosting. Hosting cannot simply be switched on here — EnableListenServer only creates a net
+// driver when the world has none — so ON arms it and it fires when a map is actually up.
 static void OnMultiplayerClicked() {
     ++g_clicks;
-    // Hosting from the menu has to happen before a level is loaded: EnableListenServer only creates a
-    // net driver when the world has none, so arming it here means the map the player then loads (via
-    // the stock Continue / Load / New Game entries) comes up already listening.
-    if (coop::CurrentRole() == coop::Role::None) {
-        LOGF("[menu] MULTIPLAYER pressed -> arming host mode for the next map load");
-        g_armHost = true;
-    } else {
+    if (coop::CurrentRole() != coop::Role::None) {
         LOGF("[menu] MULTIPLAYER pressed -> already in a session (%s)",
              coop::CurrentRole() == coop::Role::Host ? "host" : "client");
+        return;
+    }
+    if (g_armHost || !g_pendingJoin.empty()) {
+        g_armHost = false;
+        g_pendingJoin.clear();
+        steamp2p::SetConnectPresence("");        // stop advertising "Join Game" to friends
+        LOGF("[menu] multiplayer OFF");
+    } else {
+        g_armHost = true;
+        steamp2p::SetConnectPresence(steamp2p::ConnectString());
+        LOGF("[menu] multiplayer ON -> the next map loaded will host");
     }
     g_lastStatus.clear();      // force the readout to refresh
 }
@@ -147,12 +152,56 @@ static void H_ProcessEvent(UObject* obj, UFunction* fn, void* parms) {
     if (obj && fn && (obj == g_button || obj == g_slots[0] || obj == g_slots[1] || obj == g_slots[2] || obj == g_slots[3])) {
         const std::string n = GetName((UObject*)fn);
         if (g_trace) LOGF("[menu] trace %s <- %s", obj == g_button ? "entry" : "slot", n.c_str());
-        if (n == "OnBtnClicked" && Settled()) {
+        if (n == "OnBtnClicked" && Settled() && !g_selfUpdate) {
             if (obj == g_button) OnMultiplayerClicked();
             else for (int i = 0; i < players::kMaxPlayers; ++i) if (obj == g_slots[i]) { OnSlotClicked(i); break; }
         }
     }
     o_ProcessEvent(obj, fn, parms);
+}
+
+// Put our entry directly under NEW GAME. UPanelWidget has no InsertChildAt, so the only way to place
+// a child at an index is to detach everything below the anchor and re-attach it in the wanted order.
+// Re-adding creates fresh UVerticalBoxSlots with default layout, which would visibly change the menu's
+// spacing, so each slot's settings block is copied back over the new one. Parent/Content sit before
+// that block, so copying [Size .. end) never touches the linkage.
+static void CopySlotSettings(UObject* dst, const uint8_t* src) {
+    if (!dst || !src) return;
+    constexpr uint32_t from = es2off::UVerticalBoxSlot::Size;
+    memcpy(reinterpret_cast<uint8_t*>(dst) + from, src + from, es2off::UVerticalBoxSlot::__size - from);
+}
+
+static void InsertAfter(UObject* box, UObject* widget, const char* anchorName) {
+    auto addChild = Rva<std::remove_pointer_t<Fn_AddChild>>(es2rva::UPanelWidget_AddChild);
+    auto removeChild = Rva<std::remove_pointer_t<Fn_RemoveChild>>(es2rva::UPanelWidget_RemoveChild);
+    struct RawArray { UObject** Data; int32_t Num; int32_t Max; };
+    RawArray& slots = UE_FIELD(RawArray, box, es2off::UPanelWidget::Slots);
+
+    int anchor = -1;
+    std::vector<UObject*> tail;
+    std::vector<std::vector<uint8_t>> tailSettings;
+    std::vector<uint8_t> templateSettings;
+    for (int i = 0; i < slots.Num; ++i) {
+        UObject* slot = slots.Data[i];
+        if (!slot || !IsValidObject(slot)) continue;
+        UObject* content = UE_FIELD(UObject*, slot, es2off::UPanelSlot::Content);
+        if (templateSettings.empty())
+            templateSettings.assign(reinterpret_cast<uint8_t*>(slot), reinterpret_cast<uint8_t*>(slot) + es2off::UVerticalBoxSlot::__size);
+        if (anchor < 0) {
+            if (content && GetName(content) == anchorName) anchor = i;
+            continue;
+        }
+        tail.push_back(content);
+        tailSettings.emplace_back(reinterpret_cast<uint8_t*>(slot), reinterpret_cast<uint8_t*>(slot) + es2off::UVerticalBoxSlot::__size);
+    }
+    if (anchor < 0) { addChild(box, widget, nullptr); return; }   // anchor gone: fall back to the end
+
+    for (auto it = tail.rbegin(); it != tail.rend(); ++it) if (*it) removeChild(box, *it);
+    CopySlotSettings((UObject*)addChild(box, widget, nullptr), templateSettings.data());
+    for (size_t i = 0; i < tail.size(); ++i) {
+        if (!tail[i]) continue;
+        CopySlotSettings((UObject*)addChild(box, tail[i], nullptr), tailSettings[i].data());
+    }
 }
 
 // ---------------------------------------------------------------- lobby overview
@@ -174,6 +223,9 @@ static void CallDoubles(UObject* obj, const char* fname, const double* v, int n)
     for (int i = 0; i < n; ++i) d[i] = v[i];
     ProcessEvent(obj, fn, parms.data());
 }
+
+// The main menu's own vertical pitch, in UMG design units (its buttons sit 80 apart).
+static constexpr double kMenuRowPitch = 80.0;
 
 static void CallBool(UObject* obj, const char* fname, bool v) {
     if (!obj) return;
@@ -215,6 +267,7 @@ static void SetSlotVisible(UObject* w, bool on) {
     // ESlateVisibility: 0 Visible, 1 Collapsed, 2 Hidden, 3 HitTestInvisible, 4 SelfHitTestInvisible
     UFunction* fn = FindFunction(w, "SetVisibility");
     if (!fn) return;
+    SelfUpdate guard;
     uint8_t v = on ? 0 : 1;
     ProcessEvent(w, fn, &v);
 }
@@ -229,9 +282,11 @@ static void BuildLobbySlots(UObject* canvas, UClass* buttonClass, APlayerControl
         if (slot) {
             const double anchors[4] = {1.0, 0.0, 1.0, 0.0};   // pin to the top-right corner
             const double align[2]   = {1.0, 0.0};             // and grow leftwards/down from it
-            // 46 was too tight: an auto-sized WG_MainMenu_Root_Button_C is ~57 units tall, so the
-            // rows drew on top of each other (the focus border needs a little clearance too).
-            const double pos[2]     = {-60.0, 150.0 + i * 64.0};
+            // Use the main menu's own row pitch. An auto-sized WG_MainMenu_Root_Button_C is ~57 units
+            // tall, so anything tighter overlapped — visibly so once a row was highlighted and drew its
+            // focus border. 80 is what the menu itself spaces its buttons by, which also makes the two
+            // lists read as one design.
+            const double pos[2]     = {-60.0, 150.0 + i * kMenuRowPitch};
             CallDoubles(slot, "SetAnchors", anchors, 4);
             CallDoubles(slot, "SetAlignment", align, 2);
             CallDoubles(slot, "SetPosition", pos, 2);
@@ -299,7 +354,7 @@ static bool BuildButtons() {
     UObject* btn = create((UObject*)GetWorld(), &buttonClass, pc);
     if (!btn) { LOGF("[menu] CreateWidget failed"); return false; }
     SetButtonText(btn, LobbyLine());
-    addChild(box, btn, nullptr);
+    InsertAfter(box, btn, "ButtonNewGame");
 
     g_menu = menu; g_button = btn; g_statusButton = btn;
     g_injected = btn; g_injectedBox = box;

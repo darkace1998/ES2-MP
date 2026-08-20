@@ -215,6 +215,10 @@ OFFSETS = {
     'FEnumProperty': ['UnderlyingProp', 'Enum'],
     'FClassProperty': ['MetaClass'],
     'UEnum': ['CppType', 'Names', 'CppForm', 'EnumFlags'],
+    # Main-menu injection: reorder the button VerticalBox by hand (UPanelWidget has no InsertChildAt).
+    'UPanelWidget': ['Slots'],
+    'UPanelSlot': ['Parent', 'Content'],
+    'UVerticalBoxSlot': ['Size', 'Padding', 'HorizontalAlignment', 'VerticalAlignment'],
     'UEngine': ['GameViewport', 'NetDriverDefinitions'],
     'FNetDriverDefinition': ['DefName', 'DriverClassName', 'DriverClassNameFallback', 'MaxChannelsOverride'],
     'UField': ['Next'],
