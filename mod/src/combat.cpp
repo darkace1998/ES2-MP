@@ -19,6 +19,7 @@
 #include <cmath>
 #include <map>
 #include <vector>
+#include <array>
 #include <functional>
 #include <cstring>
 
@@ -153,6 +154,16 @@ static std::map<UObject*, bool> g_npcFireState;
 // Applied every tick, because the client's own SmoothedAutoaim keeps overwriting the field with a value
 // derived from an AI that is not running here.
 static std::map<UObject*, FVector> g_npcAim;
+// The auto-aim target is recomputed by SmoothedAutoaim every tick just like FocusLocation, so it is
+// stamped the same way rather than set once. Keyed per weapon category for players, per component for
+// mirrored NPCs. A reported guid of 0 means "no target" and is applied as such; a non-zero guid we
+// cannot resolve leaves the local value alone, since clearing it would be strictly worse.
+static std::map<int, std::array<uint64_t, 2>> g_playerAutoAim;   // playerId -> guid per category
+static std::map<int, std::array<uint64_t, 2>> g_playerLock;       // playerId -> locked target guid per category
+static std::map<UObject*, uint64_t> g_npcLock;
+static std::map<UObject*, uint64_t> g_npcAutoAim;
+static bool g_autoAimSync = true;
+static uint64_t g_autoAimApplied = 0;
 static double g_npcAimAccum = 0;
 static float g_npcAimHz = 10.f;
 static bool g_npcAimSync = true;
@@ -197,15 +208,32 @@ static AActor* ActorFromNetGuid(uint64_t guid) {
     return (o && IsValidObject(o)) ? (AActor*)o : nullptr;
 }
 
-// Apply a locked target that arrived over the wire, but only when it actually changed — SetLockedTarget
-// restarts the missile lock and fires events, so calling it every tick would keep the lock at zero.
+// Apply a locked target that arrived over the wire.
+//
+// This has to run every tick, not once on change: on the host the client's weapon component has no
+// player driving it, and ES2's own tick clears the lock again immediately — measured, the host applied
+// it 1562 times and still read "none" on every sample. So it is stamped at the top of each tick like
+// FocusLocation, and only when it differs from what is currently there.
+//
+// SetLockedTarget is still the right way in (it owns the weak-pointer encoding and the OnNewTargetLocked
+// / OnTargetUnLocked events), but it also restarts the missile lock — which, re-applied every tick,
+// would pin the lock at zero and no missile would ever acquire. So the timer is carried across.
 static uint64_t g_lockApplied = 0;
+static std::map<UObject*, uint64_t> g_lockTried;     // component -> last guid we attempted
 static void ApplyLock(UObject* wc, uint64_t guid) {
     if (!wc || !IsValidObject(wc)) return;
+    // Attempt only when the REPORTED target changes. ES2 will not necessarily keep it (see below), and
+    // retrying every tick meant calling SetLockedTarget ~60x/second to no effect.
+    auto tried = g_lockTried.find(wc);
+    if (tried != g_lockTried.end() && tried->second == guid) return;
     AActor* want = ActorFromNetGuid(guid);
-    AActor* have = GetLock(wc);
-    if (want == have) return;
+    if (!want && guid != 0) return;              // unresolvable here: leave whatever is there alone
+    g_lockTried[wc] = guid;
+    if (want == GetLock(wc)) return;
+    // SetLockedTarget restarts the missile lock, so carry the timer across.
+    float remaining = UE_FIELD(float, wc, es2off::UWeaponComponent::RemainingMissileLockTime);
     SetLock(wc, want);
+    UE_FIELD(float, wc, es2off::UWeaponComponent::RemainingMissileLockTime) = remaining;
     ++g_lockApplied;
 }
 
@@ -281,13 +309,14 @@ static UObject* ResolveNpcWeapon(unsigned long long guid, int cat) {
 }
 
 static bool ApplyNpcAim(const std::string& body) {
-    unsigned long long guid = 0, lock = 0; int cat = 0; double x = 0, y = 0, z = 0;
-    int n = sscanf(body.c_str(), "%llu|%d|%lf|%lf|%lf|%llu", &guid, &cat, &x, &y, &z, &lock);
+    unsigned long long guid = 0, lock = 0, aa = 0; int cat = 0; double x = 0, y = 0, z = 0;
+    int n = sscanf(body.c_str(), "%llu|%d|%lf|%lf|%lf|%llu|%llu", &guid, &cat, &x, &y, &z, &lock, &aa);
     if (n < 5) return true;
     UObject* wc = ResolveNpcWeapon(guid, cat);
     if (!wc) return true;
     g_npcAim[wc] = FVector{x, y, z};
-    if (n >= 6 && g_lockSync) ApplyLock(wc, lock);
+    if (n >= 6) g_npcLock[wc] = lock;               // stamped per tick, see ApplyLock
+    if (n >= 7) g_npcAutoAim[wc] = aa;
     return true;
 }
 
@@ -305,7 +334,7 @@ static bool ApplyNpcFire(const std::string& body) {
     for (auto& p : GetProperties((UStruct*)GetClass((UObject*)best), true))
         if (p.Name == prop) { wc = UE_FIELD(UObject*, best, p.Offset); break; }
     if (!wc || !IsValidObject(wc)) { ++g_npcFireUnresolved; return true; }
-    if (!down) g_npcAim.erase(wc);                        // stop tracking a weapon that went quiet
+    if (!down) { g_npcAim.erase(wc); g_npcAutoAim.erase(wc); g_npcLock.erase(wc); g_lockTried.erase(wc); }                        // stop tracking a weapon that went quiet
     if (down) o_StartFire(wc); else o_StopFire(wc);        // originals: never re-enter our own hook
     ++g_npcFireApplied;
     return true;
@@ -329,6 +358,20 @@ static double g_aimAccum = 0;
 static float g_aimHz = 20.f;
 static bool g_aimSync = true;
 static uint64_t g_aimSent = 0, g_aimApplied = 0;
+
+// Stamp an auto-aim target reported over the wire onto a weapon component.
+static void ApplyAutoAim(UObject* wc, uint64_t guid) {
+    if (!g_autoAimSync || !wc) return;
+    if (guid == 0) {
+        UE_FIELD(AActor*, wc, es2off::UWeaponComponent::CurrentAutoAimTarget) = nullptr;
+        ++g_autoAimApplied;
+        return;
+    }
+    if (AActor* t = ActorFromNetGuid(guid)) {
+        UE_FIELD(AActor*, wc, es2off::UWeaponComponent::CurrentAutoAimTarget) = t;
+        ++g_autoAimApplied;
+    }
+}
 
 static bool IsFinite3(const FVector& v) {
     return std::isfinite(v.X) && std::isfinite(v.Y) && std::isfinite(v.Z);
@@ -375,10 +418,12 @@ static void HostNpcAimTick(float dt) {
         Rva<std::remove_pointer_t<Fn_GetNetGUID>>(es2rva::FNetGUIDCache_GetNetGUID)(cache, &guid, (const UObject*)owner);
         if (!guid) continue;
         int cat = (int)UE_FIELD(uint8_t, wc, es2off::UWeaponComponent::WeaponCategory);
-        uint64_t lock = 0;
+        uint64_t lock = 0, aa = 0;
         if (AActor* t = GetLock(wc)) lock = NetGuidOf((const UObject*)t);
-        coop::SendToAllClients(Format("WA|%llu|%d|%.1f|%.1f|%.1f|%llu", (unsigned long long)guid, cat,
-                                      f.X, f.Y, f.Z, (unsigned long long)lock));
+        AActor* a = UE_FIELD(AActor*, wc, es2off::UWeaponComponent::CurrentAutoAimTarget);
+        if (a && IsValidObject((UObject*)a)) aa = NetGuidOf((const UObject*)a);
+        coop::SendToAllClients(Format("WA|%llu|%d|%.1f|%.1f|%.1f|%llu|%llu", (unsigned long long)guid, cat,
+                                      f.X, f.Y, f.Z, (unsigned long long)lock, (unsigned long long)aa));
         ++g_npcAimSent;
     }
     g_npcAimCursor = (g_npcAimCursor + kNpcAimPerTick) % firing.size();
@@ -403,14 +448,17 @@ void ClientAimTick(float dt) {
     if (!got) return;
     // Carry the locked target per weapon category as well: missiles home on it, and on the host our
     // weapon component has no player to have locked anything.
-    uint64_t lock[2] = {0, 0};
+    uint64_t lock[2] = {0, 0}, aa[2] = {0, 0};
     ForEachWeaponComponent(pawn, [&](UObject* wc) {
         int cat = (int)UE_FIELD(uint8_t, wc, es2off::UWeaponComponent::WeaponCategory);
         if (cat < 0 || cat > 1) return;
         if (AActor* t = GetLock(wc)) lock[cat] = NetGuidOf((const UObject*)t);
+        AActor* a = UE_FIELD(AActor*, wc, es2off::UWeaponComponent::CurrentAutoAimTarget);
+        if (a && IsValidObject((UObject*)a)) aa[cat] = NetGuidOf((const UObject*)a);
     });
-    coop::SendToServer(Format("AIM|%.1f|%.1f|%.1f|%llu|%llu", focus.X, focus.Y, focus.Z,
-                              (unsigned long long)lock[0], (unsigned long long)lock[1]));
+    coop::SendToServer(Format("AIM|%.1f|%.1f|%.1f|%llu|%llu|%llu|%llu", focus.X, focus.Y, focus.Z,
+                              (unsigned long long)lock[0], (unsigned long long)lock[1],
+                              (unsigned long long)aa[0], (unsigned long long)aa[1]));
     ++g_aimSent;
 }
 
@@ -424,6 +472,10 @@ static void H_WeaponTick(UObject* comp, float dt, int tickType, void* tickFn) {
             UE_FIELD(FVector, comp, es2off::UWeaponComponent::FocusLocation) = it->second;
             UE_FIELD(FVector, comp, es2off::UWeaponComponent::ClampedNonAutoAimedFocusLocation) = it->second;
             ++g_npcAimApplied;
+            auto aa = g_npcAutoAim.find(comp);
+            if (aa != g_npcAutoAim.end()) ApplyAutoAim(comp, aa->second);
+            auto lk = g_npcLock.find(comp);
+            if (lk != g_npcLock.end() && g_lockSync) ApplyLock(comp, lk->second);
         }
     }
     if (g_aimSync && !g_aim.empty() && comp && coop::CurrentRole() == coop::Role::Host) {
@@ -435,6 +487,11 @@ static void H_WeaponTick(UObject* comp, float dt, int tickType, void* tickFn) {
                     UE_FIELD(FVector, comp, es2off::UWeaponComponent::FocusLocation) = it->second;
                     UE_FIELD(FVector, comp, es2off::UWeaponComponent::ClampedNonAutoAimedFocusLocation) = it->second;
                     ++g_aimApplied;
+                    int cat = (int)UE_FIELD(uint8_t, comp, es2off::UWeaponComponent::WeaponCategory);
+                    auto aa = g_playerAutoAim.find(p->id);
+                    if (aa != g_playerAutoAim.end() && cat >= 0 && cat <= 1) ApplyAutoAim(comp, aa->second[cat]);
+                    auto lk = g_playerLock.find(p->id);
+                    if (lk != g_playerLock.end() && g_lockSync && cat >= 0 && cat <= 1) ApplyLock(comp, lk->second[cat]);
                 }
             }
         }
@@ -445,19 +502,14 @@ static void H_WeaponTick(UObject* comp, float dt, int tickType, void* tickFn) {
 // ---------------------------------------------------------------- messages
 bool OnServerOp(APlayerController* from, const std::string& op, const std::string& body) {
     if (op == "AIM") {
-        double x = 0, y = 0, z = 0; unsigned long long l0 = 0, l1 = 0;
-        int n = sscanf(body.c_str(), "%lf|%lf|%lf|%llu|%llu", &x, &y, &z, &l0, &l1);
+        double x = 0, y = 0, z = 0; unsigned long long l0 = 0, l1 = 0, a0 = 0, a1 = 0;
+        int n = sscanf(body.c_str(), "%lf|%lf|%lf|%llu|%llu|%llu|%llu", &x, &y, &z, &l0, &l1, &a0, &a1);
         if (n < 3) return true;
         players::Player* p = players::ByController(from);
         if (!p) return true;
         g_aim[p->id] = FVector{x, y, z};
-        if (n >= 5 && g_lockSync && p->pawn && IsValidObject((UObject*)p->pawn)) {
-            ForEachWeaponComponent(p->pawn, [&](UObject* wc) {
-                int cat = (int)UE_FIELD(uint8_t, wc, es2off::UWeaponComponent::WeaponCategory);
-                if (cat == 0) ApplyLock(wc, l0);
-                else if (cat == 1) ApplyLock(wc, l1);
-            });
-        }
+        if (n >= 7) g_playerAutoAim[p->id] = {a0, a1};
+        if (n >= 5) g_playerLock[p->id] = {l0, l1};   // stamped per tick, see ApplyLock
         return true;
     }
     if (op == "F") {
@@ -575,7 +627,8 @@ static void CmdAimInfo(const console::Args& a, std::string& out) {
                             (unsigned long long)(t ? NetGuidOf((const UObject*)t) : 0));
         });
         out += Format("     focus=(%.0f, %.0f, %.0f) autoAimTarget=%s\n", focus.X, focus.Y, focus.Z,
-                      (aim && IsValidObject(aim)) ? GetName(aim).c_str() : "none");
+                      (aim && IsValidObject(aim)) ? Format("%s(guid %llu)", GetName(aim).c_str(),
+                          (unsigned long long)NetGuidOf(aim)).c_str() : "none");
         out += Format("     lock:%s\n", locks.c_str());
     }
     if (out.empty()) out = "no players\n";
@@ -611,6 +664,7 @@ static void CmdAimInfo(const console::Args& a, std::string& out) {
 static void CmdCombat(const console::Args& a, std::string& out) {
     if (a.size() > 2 && a[1] == "route") g_routeFire = a[2] == "1";
     if (a.size() > 2 && a[1] == "localfire") g_localFire = a[2] == "1";
+    if (a.size() > 2 && a[1] == "autoaim") { g_autoAimSync = a[2] == "1"; out += Format("autoaim sync %d\n", (int)g_autoAimSync); return; }
     if (a.size() > 2 && a[1] == "locksync") { g_lockSync = a[2] == "1"; out += Format("lock sync %d\n", (int)g_lockSync); return; }
     if (a.size() > 2 && a[1] == "npcaim") { g_npcAimSync = a[2] == "1"; out += Format("npc aim sync %d\n", (int)g_npcAimSync); return; }
     if (a.size() > 2 && a[1] == "aimsync") { g_aimSync = a[2] == "1"; out += Format("aim sync %d\n", (int)g_aimSync); return; }
@@ -619,6 +673,7 @@ static void CmdCombat(const console::Args& a, std::string& out) {
     out += Format("npcFireMirror=%d sent=%llu applied=%llu unresolved=%llu deduped=%llu\n", (int)g_mirrorNpcFire,
                   (unsigned long long)g_npcFireSent, (unsigned long long)g_npcFireApplied,
                   (unsigned long long)g_npcFireUnresolved, (unsigned long long)g_npcFireDeduped);
+    out += Format("autoAimSync=%d autoAimApplied=%llu\n", (int)g_autoAimSync, (unsigned long long)g_autoAimApplied);
     out += Format("lockSync=%d lockApplied=%llu\n", (int)g_lockSync, (unsigned long long)g_lockApplied);
     out += Format("npcAimSync=%d npcAimSent=%llu npcAimApplied=%llu npcAimTracked=%d\n",
                   (int)g_npcAimSync, (unsigned long long)g_npcAimSent, (unsigned long long)g_npcAimApplied, (int)g_npcAim.size());

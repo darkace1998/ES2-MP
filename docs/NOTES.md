@@ -121,12 +121,18 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
   keyed by the same NetGUID the trigger mirroring uses. Only firing shooters are sent, at 10 Hz, six per
   tick round-robin, so a busy fight cannot flood the reliable channel. Verified by matched NetGUID:
   identical focus on both machines, bar the ~100 ms of staleness while an NPC is turning.
-  The locked target rides along with both streams as a NetGUID and is applied through ES2's own
-  `UWeaponComponent::SetLockedTarget`, which drives the missile-lock timer and the OnNewTargetLocked /
-  OnTargetUnLocked events — poking the `LockedTarget` weak pointer would set the field without any of
-  that. Apply only on change: the setter restarts the lock, so calling it every tick pins the missile
-  lock at zero forever. Still not synced: `CurrentAutoAimTarget` (ES2 recomputes it locally each tick
-  from the focus point, which is now correct, so it largely follows on its own).
+  `CurrentAutoAimTarget` rides along as a NetGUID and is stamped the same way (verified: guid 35 on both
+  machines for the same turret).
+- **The locked target does NOT stick on the host, and probably cannot be forced.** It is sent as a
+  NetGUID and applied through `UWeaponComponent::SetLockedTarget`, but the host reads it straight back as
+  none: `GetLockedTarget` (0x2B3B004) returns null whenever the weak pointer's serial at +0x8C4 is 0, and
+  that is what the field holds after the call. Measured — 1562 applications, every sample still "none".
+  ES2 treats a lock as a state machine driven by player input (SearchTargetToLock, a lock timer,
+  On*TargetLocked events), not a value an outsider can assign, so re-stamping it every tick just burned
+  60 calls a second for nothing; it is now attempted only when the reported target changes. Two early
+  samples DID show it held, so it sticks under conditions I have not pinned down. Consequence: a client's
+  missiles may not home on the host. Aim direction is unaffected — that is FocusLocation, which is
+  synced and verified.
 - **XP not yet observed firing.** The path is implemented and armed, but the harness cannot reliably make a parked ship land a kill, so no live award has been measured.
 - **Docking, stations, and mission *item* rewards** are not mirrored; `UMissionLib::AddNonItemRewards` is mapped (XP + credits + job score — it does *not* grant faction standing) but not yet hooked.
 - **Mission records that only one side has.** The client applies deltas to existing `FTaskSaveGameData` records; creating one from scratch (320 bytes with TArray/TMap members) is deliberately not attempted.
