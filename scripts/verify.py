@@ -162,12 +162,13 @@ def main():
     hf, hg = aim_of(HOST)
     cf, cg = aim_of(CLIENT)
     check("client's aim reaches the host", bool(hf and cf) and hf == cf, f'host={hf} client={cf}')
-    # Deliberately NOT asserted: the locked target does not reliably survive on the host. ES2 treats a
-    # lock as a state machine driven by player input, and UWeaponComponent::SetLockedTarget will not keep
-    # a target assigned from outside — GetLockedTarget reads the weak pointer's serial back as 0. The
-    # guid is still sent and applied on change; this line reports it rather than failing the suite.
-    print(f'INFO  target lock: host guid={hg} client guid={cg}'
-          + ('  (matched)' if hg and cg and hg == cg and hg != "0" else '  (not held on the host — known limitation)'))
+    # Assert only when the client actually holds a lock — in the suite's start position there may be no
+    # target in range, and there is nothing to propagate then. It still fails if the client has a lock
+    # and the host does not, which is the regression worth catching.
+    if cg and cg != '0':
+        check("client's target lock reaches the host", hg == cg, f'host guid={hg} client guid={cg}')
+    else:
+        print(f'INFO  target lock: client holds none here, nothing to compare (host guid={hg})')
 
     # A weapon swap must move UWeaponComponent::EquippedSlotIndex on the client.
     def equipped():

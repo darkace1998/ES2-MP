@@ -200,12 +200,39 @@ static uint64_t NetGuidOf(const UObject* actor) {
     Rva<std::remove_pointer_t<Fn_GetNetGUID>>(es2rva::FNetGUIDCache_GetNetGUID)(cache, &guid, actor);
     return guid;
 }
+// Resolving a NetGUID back to an actor is only dependable on a CLIENT: that is the direction a client
+// needs, so its cache keeps the guid -> object map populated. A server mostly needs object -> guid, and
+// asking it the other way returns whatever happens to be there — observed handing back
+// Default__BP_Outlaw_Scout_C (a class default object!) for a guid that genuinely belonged to a turret.
+// Acting on that meant locking onto a CDO, which is why a client's lock never appeared on the host.
+//
+// So: try the cache, but only trust an answer that round-trips back to the same guid. Otherwise fall
+// back to scanning actors and matching on the object -> guid direction, which is reliable on both sides.
+// The scan only runs when a lock actually changes, not per tick.
+static uint64_t g_guidScans = 0;
 static AActor* ActorFromNetGuid(uint64_t guid) {
+    if (!guid) return nullptr;
     void* cache = LocalGuidCache();
-    if (!cache || !guid) return nullptr;
+    if (!cache) return nullptr;
     uint64_t g = guid;
     UObject* o = Rva<std::remove_pointer_t<Fn_GetObjectFromNetGUID>>(es2rva::FNetGUIDCache_GetObjectFromNetGUID)(cache, &g, false);
-    return (o && IsValidObject(o)) ? (AActor*)o : nullptr;
+    if (o && IsValidObject(o) && !(GetObjectFlags(o) & 0x10 /*RF_ClassDefaultObject*/)) {
+        uint64_t back = 0;
+        Rva<std::remove_pointer_t<Fn_GetNetGUID>>(es2rva::FNetGUIDCache_GetNetGUID)(cache, &back, o);
+        if (back == guid) return (AActor*)o;
+    }
+    ++g_guidScans;
+    AActor* found = nullptr;
+    UClass* actorClass = FindClass("Actor");
+    ForEachObject([&](UObject* obj) {
+        if (!actorClass || !IsA(obj, actorClass)) return true;
+        if (GetObjectFlags(obj) & 0x10) return true;                 // never a class default object
+        uint64_t back = 0;
+        Rva<std::remove_pointer_t<Fn_GetNetGUID>>(es2rva::FNetGUIDCache_GetNetGUID)(cache, &back, obj);
+        if (back == guid) { found = (AActor*)obj; return false; }
+        return true;
+    });
+    return found;
 }
 
 // Apply a locked target that arrived over the wire.
@@ -219,16 +246,16 @@ static AActor* ActorFromNetGuid(uint64_t guid) {
 // / OnTargetUnLocked events), but it also restarts the missile lock — which, re-applied every tick,
 // would pin the lock at zero and no missile would ever acquire. So the timer is carried across.
 static uint64_t g_lockApplied = 0;
-static std::map<UObject*, uint64_t> g_lockTried;     // component -> last guid we attempted
 static void ApplyLock(UObject* wc, uint64_t guid) {
     if (!wc || !IsValidObject(wc)) return;
     // Attempt only when the REPORTED target changes. ES2 will not necessarily keep it (see below), and
     // retrying every tick meant calling SetLockedTarget ~60x/second to no effect.
-    auto tried = g_lockTried.find(wc);
-    if (tried != g_lockTried.end() && tried->second == guid) return;
+    // Retry every tick. An earlier "only attempt when the reported guid changes" guard was the whole
+    // reason this looked impossible: the first attempt resolved to a class default object (see
+    // ActorFromNetGuid) and the guard then refused to ever try again. `want == GetLock(wc)` below is the
+    // real guard — once the lock is in place this costs a comparison and nothing else.
     AActor* want = ActorFromNetGuid(guid);
     if (!want && guid != 0) return;              // unresolvable here: leave whatever is there alone
-    g_lockTried[wc] = guid;
     if (want == GetLock(wc)) return;
     // SetLockedTarget restarts the missile lock, so carry the timer across.
     float remaining = UE_FIELD(float, wc, es2off::UWeaponComponent::RemainingMissileLockTime);
@@ -334,7 +361,7 @@ static bool ApplyNpcFire(const std::string& body) {
     for (auto& p : GetProperties((UStruct*)GetClass((UObject*)best), true))
         if (p.Name == prop) { wc = UE_FIELD(UObject*, best, p.Offset); break; }
     if (!wc || !IsValidObject(wc)) { ++g_npcFireUnresolved; return true; }
-    if (!down) { g_npcAim.erase(wc); g_npcAutoAim.erase(wc); g_npcLock.erase(wc); g_lockTried.erase(wc); }                        // stop tracking a weapon that went quiet
+    if (!down) { g_npcAim.erase(wc); g_npcAutoAim.erase(wc); g_npcLock.erase(wc); }                        // stop tracking a weapon that went quiet
     if (down) o_StartFire(wc); else o_StopFire(wc);        // originals: never re-enter our own hook
     ++g_npcFireApplied;
     return true;
@@ -608,6 +635,45 @@ static void CmdInput(const console::Args& a, std::string& out) {
 // aim [playerId] — what each player's weapons are actually pointing at on THIS machine.
 // UWeaponComponent::FocusLocation is the world point AWeaponBase::GetAimDirection reads, so comparing
 // it between host and client is the direct measure of whether a client's shots go where it aims.
+// guid <n> — resolve a NetGUID back to an actor on THIS machine. The reverse lookup is the half of
+// FNetGUIDCache a server does not normally need, so this checks whether it works host-side at all.
+static void CmdGuid(const console::Args& a, std::string& out) {
+    if (a.size() < 2) { out = "usage: guid <netguid>\n"; return; }
+    uint64_t g = strtoull(a[1].c_str(), nullptr, 10);
+    AActor* r = ActorFromNetGuid(g);
+    out += Format("guid %llu -> %s\n", (unsigned long long)g,
+                  r ? GetFullName((UObject*)r).c_str() : "NOT RESOLVED on this machine");
+    if (r) out += Format("  reverse check: NetGuidOf(that actor) = %llu\n",
+                         (unsigned long long)NetGuidOf((const UObject*)r));
+}
+
+// locktest <playerId> <targetGuid> — set a lock on that player's server-side weapons and read it back
+// IN THE SAME CALL, which separates "SetLockedTarget refused it" from "something cleared it later".
+static void CmdLockTest(const console::Args& a, std::string& out) {
+    if (a.size() < 3) { out = "usage: locktest <playerId> <targetGuid>\n"; return; }
+    int id = atoi(a[1].c_str());
+    uint64_t g = strtoull(a[2].c_str(), nullptr, 10);
+    players::Player* p = players::ById(id);
+    if (!p || !p->pawn || !IsValidObject((UObject*)p->pawn)) { out = "no such player / pawn\n"; return; }
+    AActor* want = ActorFromNetGuid(g);
+    out += Format("target guid %llu -> %s\n", (unsigned long long)g, want ? GetName((UObject*)want).c_str() : "UNRESOLVED");
+    if (!want) return;
+    ForEachWeaponComponent(p->pawn, [&](UObject* wc) {
+        int cat = (int)UE_FIELD(uint8_t, wc, es2off::UWeaponComponent::WeaponCategory);
+        AActor* owner = UE_FIELD(AActor*, wc, es2off::UActorComponent::OwnerPrivate);
+        out += Format("  cat=%d owner=%s selfLockGuard=%s\n", cat, GetName((UObject*)owner).c_str(),
+                      owner == want ? "WOULD TRIP (target is the owner)" : "ok");
+        AActor* before = GetLock(wc);
+        SetLock(wc, want);
+        AActor* after = GetLock(wc);
+        int32_t idx = UE_FIELD(int32_t, wc, es2off::UWeaponComponent::LockedTarget);
+        int32_t ser = UE_FIELD(int32_t, wc, es2off::UWeaponComponent::LockedTarget + 4);
+        out += Format("    before=%s  after=%s   weakptr{index=%d serial=%d}\n",
+                      before ? GetName((UObject*)before).c_str() : "none",
+                      after ? GetName((UObject*)after).c_str() : "none", idx, ser);
+    });
+}
+
 static void CmdAimInfo(const console::Args& a, std::string& out) {
     for (auto* p : players::All()) {
         if (!p->pawn || !IsValidObject((UObject*)p->pawn)) continue;
@@ -674,7 +740,8 @@ static void CmdCombat(const console::Args& a, std::string& out) {
                   (unsigned long long)g_npcFireSent, (unsigned long long)g_npcFireApplied,
                   (unsigned long long)g_npcFireUnresolved, (unsigned long long)g_npcFireDeduped);
     out += Format("autoAimSync=%d autoAimApplied=%llu\n", (int)g_autoAimSync, (unsigned long long)g_autoAimApplied);
-    out += Format("lockSync=%d lockApplied=%llu\n", (int)g_lockSync, (unsigned long long)g_lockApplied);
+    out += Format("lockSync=%d lockApplied=%llu guidScans=%llu\n", (int)g_lockSync,
+                  (unsigned long long)g_lockApplied, (unsigned long long)g_guidScans);
     out += Format("npcAimSync=%d npcAimSent=%llu npcAimApplied=%llu npcAimTracked=%d\n",
                   (int)g_npcAimSync, (unsigned long long)g_npcAimSent, (unsigned long long)g_npcAimApplied, (int)g_npcAim.size());
     out += Format("aimSync=%d aimSent=%llu aimApplied=%llu aimKnown=%d\n",
@@ -770,6 +837,8 @@ void Register() {
     console::Register("fire", "fire [primary|secondary] [on|off] - press the local fire trigger (routes to host on a client)", CmdFire);
     console::Register("input", "input <nextprimary|prevprimary|nextsecondary|travel on/off|cruise on/off> - press a real input handler (test aid)", CmdInput);
     console::Register("combat", "combat [route 0/1|localfire 0/1|hphz N] - fire-routing status and player health", CmdCombat);
+    console::Register("locktest", "locktest <playerId> <targetGuid> - set+read a lock in one call", CmdLockTest);
+    console::Register("guid", "guid <n> - resolve a NetGUID to an actor on this machine", CmdGuid);
     console::Register("aiminfo", "aiminfo [npc] - weapon FocusLocation per player, or per NPC keyed by NetGUID", CmdAimInfo);
     console::Register("hp", "hp [Class] - health/shield ratios of pawns in the world", CmdHp);
     console::Register("lock", "lock [playerId] - acquire closest target (host: on that player's server-side pawn)", CmdLock);

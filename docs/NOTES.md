@@ -123,16 +123,20 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
   identical focus on both machines, bar the ~100 ms of staleness while an NPC is turning.
   `CurrentAutoAimTarget` rides along as a NetGUID and is stamped the same way (verified: guid 35 on both
   machines for the same turret).
-- **The locked target does NOT stick on the host, and probably cannot be forced.** It is sent as a
-  NetGUID and applied through `UWeaponComponent::SetLockedTarget`, but the host reads it straight back as
-  none: `GetLockedTarget` (0x2B3B004) returns null whenever the weak pointer's serial at +0x8C4 is 0, and
-  that is what the field holds after the call. Measured — 1562 applications, every sample still "none".
-  ES2 treats a lock as a state machine driven by player input (SearchTargetToLock, a lock timer,
-  On*TargetLocked events), not a value an outsider can assign, so re-stamping it every tick just burned
-  60 calls a second for nothing; it is now attempted only when the reported target changes. Two early
-  samples DID show it held, so it sticks under conditions I have not pinned down. Consequence: a client's
-  missiles may not home on the host. Aim direction is unaffected — that is FocusLocation, which is
-  synced and verified.
+- **A NetGUID only resolves backwards reliably on a CLIENT.** `FNetGUIDCache::GetObjectFromNetGUID` is
+  the direction a client needs, so its map is populated; a server mostly needs object -> guid and asking
+  it the other way returns whatever is there — observed handing back `Default__BP_Outlaw_Scout_C`, a class
+  default object, for a guid that genuinely belonged to a turret. Acting on that meant locking onto a CDO.
+  Always round-trip the answer (`GetNetGUID(result) == guid`) and fall back to scanning actors on the
+  object -> guid direction, which is reliable on both sides.
+- **Target lock DOES sync; SetLockedTarget needs nothing special.** It was measured setting the weak
+  pointer correctly (index=111307 serial=30088) and ES2's own weapon tick never clears it
+  (instrumented across the tick: heldBefore=106, heldAfter=106, clearedByTick=0). Its only precondition
+  is a self-lock guard — `if (newTarget == OwnerPrivate) return;` at 0x12A611F. What actually broke it
+  was the bad reverse lookup above, plus an "only attempt when the reported guid changes" rate limit that
+  then refused to ever retry after that first poisoned attempt. The real guard is `want == GetLock(wc)`,
+  which costs one comparison once the lock is in place. SetLockedTarget does restart the missile lock, so
+  carry `RemainingMissileLockTime` across the call.
 - **XP not yet observed firing.** The path is implemented and armed, but the harness cannot reliably make a parked ship land a kill, so no live award has been measured.
 - **Docking, stations, and mission *item* rewards** are not mirrored; `UMissionLib::AddNonItemRewards` is mapped (XP + credits + job score — it does *not* grant faction standing) but not yet hooked.
 - **Mission records that only one side has.** The client applies deltas to existing `FTaskSaveGameData` records; creating one from scratch (320 bytes with TArray/TMap members) is deliberately not attempted.
