@@ -8,6 +8,8 @@
 #include "coop.h"
 #include "players.h"
 #include "console.h"
+#include "steamp2p.h"
+#include <map>
 #include "log.h"
 #include "hooks.h"
 #include "combat.h"
@@ -42,6 +44,20 @@ static uint64_t g_txCount = 0, g_rxCount = 0;
 static bool g_verbose = false;
 static double g_now = 0;                 // monotonic seconds accumulated from tick dt
 static bool g_welcomed = false;          // client: the host has acknowledged us
+// A client only has a registry slot for itself, so roster names for everyone else live here.
+static std::map<int, std::string> g_remoteNames;
+static void RememberRemoteName(int id, const std::string& n) { g_remoteNames[id] = n; }
+std::string RosterName(int id) {
+    if (players::Player* p = players::ById(id)) if (!p->name.empty()) return p->name;
+    auto it = g_remoteNames.find(id);
+    return it == g_remoteNames.end() ? std::string() : it->second;
+}
+static void ApplyRoster(const std::string& body);
+int RosterCount() {
+    int n = players::Count();
+    for (auto& [id, nm] : g_remoteNames) if (!players::ById(id)) ++n;
+    return n;
+}
 static Fn_Void o_PushPause = nullptr, o_PopPause = nullptr;
 
 // smoothing tunables
@@ -230,6 +246,7 @@ bool OnServerMessage(APlayerController* fromPC, const std::string& raw) {
             if (!body.empty()) pl->name = body;
             LOGF("[coop] HELLO from %s -> id %d", pl->name.c_str(), pl->id);
             SendToClient(fromPC, Format("WELCOME|%d|%d", pl->id, players::Count()));
+            BroadcastRoster();
         }
         return true;
     }
@@ -273,6 +290,7 @@ bool OnClientMessage(APlayerController* toPC, const std::string& raw) {
         return true;
     }
     if (op == "SAY") { LOGF("[coop] say(host): %s", body.c_str()); return true; }
+    if (op == "ROSTER") { ApplyRoster(body); return true; }
     if (combat::OnClientOp(op, body)) return true;
     if (loadout::OnClientOp(op, body)) return true;
     if (travel::OnClientOp(op, body)) return true;
@@ -308,6 +326,41 @@ static void OnRoleChanged(Role r) {
 }
 
 static double g_sweepAccum = 0;
+// The lobby overview wants real names, so the client introduces itself with its Steam persona name
+// and the host echoes the whole roster back out. Falls back to a generic label without Steam.
+std::string LocalPlayerName() {
+    std::string n = steamp2p::PersonaName();
+    if (!n.empty()) return n;
+    return CurrentRole() == Role::Host ? "Host" : "Player";
+}
+
+void BroadcastRoster() {
+    if (CurrentRole() != Role::Host) return;
+    // The host's own entry is not in the registry under a name until now; label it from Steam.
+    if (players::Player* me = players::ById(0)) if (me->name.empty()) me->name = LocalPlayerName();
+    std::string msg = "ROSTER";
+    for (auto* p : players::All()) msg += Format("|%d=%s", p->id, p->name.empty() ? "Player" : p->name.c_str());
+    SendToAllClients(msg);
+}
+
+static void ApplyRoster(const std::string& body) {
+    // body: "<id>=<name>|<id>=<name>|..."
+    size_t pos = 0;
+    while (pos < body.size()) {
+        size_t bar = body.find('|', pos);
+        std::string tok = body.substr(pos, bar == std::string::npos ? std::string::npos : bar - pos);
+        size_t eq = tok.find('=');
+        if (eq != std::string::npos) {
+            int id = atoi(tok.substr(0, eq).c_str());
+            std::string name = tok.substr(eq + 1);
+            if (players::Player* p = players::ById(id)) p->name = name;
+            else RememberRemoteName(id, name);
+        }
+        if (bar == std::string::npos) break;
+        pos = bar + 1;
+    }
+}
+
 static void Tick(float dt) {
     g_now += dt;
     UWorld* w = GetWorld();
@@ -348,7 +401,7 @@ static void Tick(float dt) {
         // the world-change reset below clears g_welcomed and we simply say hello again.
         if (!g_welcomed && GetFirstLocalPlayerController(GetWorld())) {
             g_helloAccum += dt;
-            if (!g_helloSent || g_helloAccum > 2.0) { SendToServer("HELLO|client"); g_helloSent = true; g_helloAccum = 0; }
+            if (!g_helloSent || g_helloAccum > 2.0) { SendToServer("HELLO|" + LocalPlayerName()); g_helloSent = true; g_helloAccum = 0; }
         }
         g_sendAccum += dt;
         if (g_sendAccum >= 1.0 / g_sendHz) { g_sendAccum = 0; SendLocalTransform(); }

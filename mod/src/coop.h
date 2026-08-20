@@ -15,4 +15,9 @@ void SendToClient(ue::APlayerController* pc, const std::string& msg);           
 void SendToAllClients(const std::string& msg);
 void OnPostLogin(ue::APlayerController* pc);      // host: a client finished joining
 void OnLogout(ue::APlayerController* pc);         // host: a client left
+// --- lobby roster (names for the main-menu lobby overview) ---
+std::string LocalPlayerName();
+void BroadcastRoster();
+std::string RosterName(int id);   // "" when that slot is empty
+int RosterCount();
 }

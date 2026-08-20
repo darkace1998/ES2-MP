@@ -17,11 +17,74 @@
 #include <windows.h>
 #include <cstdlib>
 #include <string>
+#include <cstdio>
 
 using namespace ue;
 using es2coop::Format;
 
 namespace steamp2p {
+
+// ---------------------------------------------------------------- Steam flat API
+// The game already has steam_api64.dll loaded, so the flat C exports can be reached by name; that
+// avoids linking the SDK and keeps this working if the DLL is swapped for another build.
+static HMODULE SteamDll() { return GetModuleHandleA("steam_api64.dll"); }
+template <class T> static T Sym(const char* n) {
+    HMODULE h = SteamDll();
+    return h ? reinterpret_cast<T>(GetProcAddress(h, n)) : nullptr;
+}
+static uint64_t LocalSteamIdViaOSS();
+static void* FriendsIface() { auto f = Sym<void* (*)()>("SteamAPI_SteamFriends_v017"); return f ? f() : nullptr; }
+static void* UserIface()    { auto f = Sym<void* (*)()>("SteamAPI_SteamUser_v023");    return f ? f() : nullptr; }
+
+uint64_t LocalSteamId() {
+    auto get = Sym<uint64_t (*)(void*)>("SteamAPI_ISteamUser_GetSteamID");
+    void* u = UserIface();
+    uint64_t id = (get && u) ? get(u) : 0;
+    return id ? id : LocalSteamIdViaOSS();
+}
+std::string PersonaName() {
+    auto get = Sym<const char* (*)(void*)>("SteamAPI_ISteamFriends_GetPersonaName");
+    void* f = FriendsIface();
+    const char* n = (get && f) ? get(f) : nullptr;
+    return n ? n : std::string();
+}
+std::string FriendName(uint64_t steamId) {
+    auto get = Sym<const char* (*)(void*, uint64_t)>("SteamAPI_ISteamFriends_GetFriendPersonaName");
+    void* f = FriendsIface();
+    const char* n = (get && f && steamId) ? get(f, steamId) : nullptr;
+    return n ? n : std::string();
+}
+bool OpenInviteOverlay(const std::string& connectString) {
+    void* f = FriendsIface();
+    if (!f) { LOGF("[steam] no ISteamFriends — is Steam running?"); return false; }
+    if (!connectString.empty()) {
+        // Preferred: the friend who accepts is launched with +connect <string>, so no Steam lobby and
+        // no matchmaking callbacks are needed for them to reach us.
+        auto invite = Sym<void (*)(void*, const char*)>("SteamAPI_ISteamFriends_ActivateGameOverlayInviteDialogConnectString");
+        if (invite) { invite(f, connectString.c_str()); LOGF("[steam] invite overlay opened (connect '%s')", connectString.c_str()); return true; }
+    }
+    auto overlay = Sym<void (*)(void*, const char*)>("SteamAPI_ISteamFriends_ActivateGameOverlay");
+    if (overlay) { overlay(f, "friends"); LOGF("[steam] friends overlay opened"); return true; }
+    return false;
+}
+void SetConnectPresence(const std::string& connectString) {
+    void* f = FriendsIface();
+    if (!f) return;
+    if (connectString.empty()) {
+        auto clear = Sym<void (*)(void*, const char*)>("SteamAPI_ISteamFriends_ClearRichPresence");
+        if (clear) clear(f, "connect");
+        return;
+    }
+    auto set = Sym<bool (*)(void*, const char*, const char*)>("SteamAPI_ISteamFriends_SetRichPresence");
+    if (set) set(f, "connect", connectString.c_str());
+}
+std::string ConnectString() {
+    uint64_t id = LocalSteamIdViaOSS();
+    if (!id) return {};
+    char buf[64];
+    snprintf(buf, sizeof buf, "steam.%llu:7777", (unsigned long long)id);
+    return buf;
+}
 
 using Fn_GetNumSessions = int (*)(void* self);
 using Fn_GetUniquePlayerId = void* (*)(const void* self, void* sretSharedPtr, int localUserNum);
@@ -58,8 +121,9 @@ static int H_GetNumSessions(void* self) {
     return r;
 }
 
-// This machine's own SteamID64 — the address a partner would connect to.
-static uint64_t LocalSteamId() {
+// This machine's own SteamID64 via the online subsystem. Only valid once the Steam OSS has come
+// up, which is later than the main menu — LocalSteamIdViaOSS() prefers steam_api64 and falls back to this.
+static uint64_t LocalSteamIdViaOSS() {
     void* ident = IdentityInterface();
     if (!ident) return 0;
     // TSharedPtr<const FUniqueNetId> out; member fn returning a large struct: (this=RCX, sret=RDX, args...)
@@ -89,7 +153,7 @@ static void CmdSteam(const console::Args& a, std::string& out) {
         out += Format("   identity interface             : %p\n", IdentityInterface());
     }
     out += Format("2. FSocketSubsystemSteam singleton : %s\n", sock ? "registered" : "NULL (CreateSteamSocketSubsystem did not run)");
-    uint64_t id = LocalSteamId();
+    uint64_t id = LocalSteamIdViaOSS();
     if (id) out += Format("3. this machine's SteamID64        : %llu\n   join address                   : steam.%llu:7777\n",
                           (unsigned long long)id, (unsigned long long)id);
     else    out += "3. this machine's SteamID64        : (unavailable)\n";

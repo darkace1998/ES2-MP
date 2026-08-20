@@ -10,6 +10,7 @@
 // which is far cheaper and far less invasive than swapping a UFunction's native entry point.
 #include "menu.h"
 #include "coop.h"
+#include "steamp2p.h"
 #include "players.h"
 #include "console.h"
 #include "log.h"
@@ -41,14 +42,29 @@ static UObject* g_menu = nullptr;        // WG_MainMenu_New_C instance
 static UObject* g_button = nullptr;      // our injected entry
 static UObject* g_statusButton = nullptr;// a second, non-interactive entry used as the lobby readout
 static bool g_enabled = true;
+static bool g_trace = false;      // log every Blueprint call landing on our widgets
+// Creating these widgets makes their Blueprint fire OnBtnClicked once during construction/first focus.
+// Taken at face value that armed hosting and threw the Steam overlay up the moment the menu appeared,
+// so ignore activations until the menu has settled.
+static double g_settle = 0;
+static bool Settled() { return g_settle <= 0; }
 static uint64_t g_clicks = 0;
 static double g_accum = 0;
 static std::string g_lastStatus;
 // Set when the player picks MULTIPLAYER in the menu: the listen server can only be created once a
 // real map is up, so we arm here and fire as soon as one is.
 static bool g_armHost = false;
+// Steam launches an accepting friend with "+connect <string>" on the command line. Like hosting, the
+// join is armed rather than performed immediately: a client's own ship is rebuilt from its UPlayerData,
+// so it has to load a save first — connecting straight from the menu would put it in a default ship.
+static std::string g_pendingJoin;
+static bool g_joinChecked = false;
 // Kept across `menu rebuild` (which deliberately clears the cache) so a rebuild replaces our entry
 // instead of stacking another copy into the box.
+static UObject* g_slots[players::kMaxPlayers] = {};
+static UObject* g_slotBox = nullptr;                 // canvas we parented them to
+static std::string g_slotText[players::kMaxPlayers];
+static void OnSlotClicked(int i);
 static UObject* g_injected = nullptr;
 static UObject* g_injectedBox = nullptr;
 
@@ -96,6 +112,7 @@ static void SetButtonText(UObject* button, const std::string& text) {
 // The menu's VerticalBox has no room to spare (a second row pushed the DLC entry off the panel), and
 // UPanelWidget offers no InsertChildAt, so the entry doubles as its own status line.
 static std::string LobbyLine() {
+    if (!g_pendingJoin.empty() && coop::CurrentRole() == coop::Role::None) return "MULTIPLAYER  -  JOINING A FRIEND";
     if (g_armHost && coop::CurrentRole() == coop::Role::None) return "MULTIPLAYER  -  HOSTING NEXT GAME";
     switch (coop::CurrentRole()) {
         case coop::Role::Host: {
@@ -127,11 +144,131 @@ static void OnMultiplayerClicked() {
 
 static void H_ProcessEvent(UObject* obj, UFunction* fn, void* parms) {
     // Two pointer compares on a hot path; everything else falls straight through.
-    if (obj && obj == g_button && fn) {
+    if (obj && fn && (obj == g_button || obj == g_slots[0] || obj == g_slots[1] || obj == g_slots[2] || obj == g_slots[3])) {
         const std::string n = GetName((UObject*)fn);
-        if (n == "OnBtnClicked") OnMultiplayerClicked();
+        if (g_trace) LOGF("[menu] trace %s <- %s", obj == g_button ? "entry" : "slot", n.c_str());
+        if (n == "OnBtnClicked" && Settled()) {
+            if (obj == g_button) OnMultiplayerClicked();
+            else for (int i = 0; i < players::kMaxPlayers; ++i) if (obj == g_slots[i]) { OnSlotClicked(i); break; }
+        }
     }
     o_ProcessEvent(obj, fn, parms);
+}
+
+// ---------------------------------------------------------------- lobby overview
+//
+// Four slots pinned to the top-right of the menu's root CanvasPanel. Each is another
+// WG_MainMenu_Root_Button_C so it matches the rest of the menu and is clickable for free; an empty
+// slot opens Steam's invite dialog carrying our connect string, so the friend who accepts is dropped
+// straight into this session and no separate "join" entry is needed.
+
+// UCanvasPanelSlot's setters are BlueprintCallable, so they can be driven by reflection instead of
+// more hardcoded RVAs. Each takes a single struct of doubles (UE5 FVector2D/FAnchors are double).
+static void CallDoubles(UObject* obj, const char* fname, const double* v, int n) {
+    if (!obj) return;
+    UFunction* fn = FindFunction(obj, fname);
+    if (!fn) return;
+    int sz = UE_FIELD(uint16_t, fn, es2off::UFunction::ParmsSize);
+    std::vector<uint8_t> parms((size_t)sz + 32, 0);
+    double* d = reinterpret_cast<double*>(parms.data());
+    for (int i = 0; i < n; ++i) d[i] = v[i];
+    ProcessEvent(obj, fn, parms.data());
+}
+
+static void CallBool(UObject* obj, const char* fname, bool v) {
+    if (!obj) return;
+    UFunction* fn = FindFunction(obj, fname);
+    if (!fn) return;
+    uint8_t p = v ? 1 : 0;
+    ProcessEvent(obj, fn, &p);
+}
+
+static bool LobbyVisible() { return g_armHost || !g_pendingJoin.empty() || coop::CurrentRole() != coop::Role::None; }
+
+// Read "+connect <addr>" out of our own command line once.
+static void CheckInviteCommandLine() {
+    if (g_joinChecked) return;
+    g_joinChecked = true;
+    std::wstring cl = GetCommandLineW();
+    std::string s8 = es2coop::WideToUtf8(cl);
+    size_t at = s8.find("+connect ");
+    if (at == std::string::npos) return;
+    size_t b = at + 9;
+    while (b < s8.size() && s8[b] == ' ') ++b;
+    size_t e = s8.find_first_of(" \t\"", b);
+    std::string addr = s8.substr(b, e == std::string::npos ? std::string::npos : e - b);
+    if (addr.empty()) return;
+    g_pendingJoin = addr;
+    LOGF("[menu] launched from a Steam invite -> will join '%s' once a game is loaded", addr.c_str());
+}
+
+static std::string SlotLabel(int i) {
+    if (!LobbyVisible()) return {};
+    std::string name = coop::RosterName(i);
+    if (name.empty() && i == players::LocalId()) name = coop::LocalPlayerName();
+    if (!name.empty()) return Format("%d.  %s", i + 1, name.c_str());
+    return Format("%d.  + INVITE FRIEND", i + 1);
+}
+
+static void SetSlotVisible(UObject* w, bool on) {
+    if (!w) return;
+    // ESlateVisibility: 0 Visible, 1 Collapsed, 2 Hidden, 3 HitTestInvisible, 4 SelfHitTestInvisible
+    UFunction* fn = FindFunction(w, "SetVisibility");
+    if (!fn) return;
+    uint8_t v = on ? 0 : 1;
+    ProcessEvent(w, fn, &v);
+}
+
+static void BuildLobbySlots(UObject* canvas, UClass* buttonClass, APlayerController* pc) {
+    auto create = Rva<std::remove_pointer_t<Fn_CreateWidget>>(es2rva::UWidgetBlueprintLibrary_Create);
+    auto addChild = Rva<std::remove_pointer_t<Fn_AddChild>>(es2rva::UPanelWidget_AddChild);
+    for (int i = 0; i < players::kMaxPlayers; ++i) {
+        UObject* w = create((UObject*)GetWorld(), &buttonClass, pc);
+        if (!w) continue;
+        UObject* slot = (UObject*)addChild(canvas, w, nullptr);
+        if (slot) {
+            const double anchors[4] = {1.0, 0.0, 1.0, 0.0};   // pin to the top-right corner
+            const double align[2]   = {1.0, 0.0};             // and grow leftwards/down from it
+            // 46 was too tight: an auto-sized WG_MainMenu_Root_Button_C is ~57 units tall, so the
+            // rows drew on top of each other (the focus border needs a little clearance too).
+            const double pos[2]     = {-60.0, 150.0 + i * 64.0};
+            CallDoubles(slot, "SetAnchors", anchors, 4);
+            CallDoubles(slot, "SetAlignment", align, 2);
+            CallDoubles(slot, "SetPosition", pos, 2);
+            // Let the button size itself. SetSize on a point-anchored slot writes Offsets.Right/Bottom,
+            // which did not take here and left every slot zero-sized (present in the tree, invisible on
+            // screen); auto-size uses the widget's own desired size and matches the menu's metrics.
+            CallBool(slot, "SetAutoSize", true);
+        }
+        g_slots[i] = w;
+        g_slotText[i].clear();
+        SetSlotVisible(w, LobbyVisible());
+    }
+    g_slotBox = canvas;
+}
+
+static void UpdateLobbySlots() {
+    const bool vis = LobbyVisible();
+    for (int i = 0; i < players::kMaxPlayers; ++i) {
+        UObject* w = g_slots[i];
+        if (!w || !IsValidObject(w)) continue;
+        SetSlotVisible(w, vis);
+        if (!vis) continue;
+        std::string label = SlotLabel(i);
+        if (label == g_slotText[i]) continue;
+        g_slotText[i] = label;
+        SetButtonText(w, label);
+    }
+}
+
+static void OnSlotClicked(int i) {
+    if (!coop::RosterName(i).empty()) return;           // an occupied slot is just a readout
+    // Hosting has to be armed for the connect string to mean anything to the friend who accepts.
+    if (coop::CurrentRole() == coop::Role::None) g_armHost = true;
+    std::string cs = steamp2p::ConnectString();
+    steamp2p::SetConnectPresence(cs);
+    LOGF("[menu] lobby slot %d clicked -> Steam invite (%s)", i + 1, cs.empty() ? "no steam id" : cs.c_str());
+    steamp2p::OpenInviteOverlay(cs);
 }
 
 // ---------------------------------------------------------------- construction
@@ -166,6 +303,14 @@ static bool BuildButtons() {
 
     g_menu = menu; g_button = btn; g_statusButton = btn;
     g_injected = btn; g_injectedBox = box;
+    g_settle = 1.5;
+
+    // the lobby overview hangs off the menu's root canvas, not the button box, so it can be pinned
+    UObject* wt = GetObjectProp(menu, "WidgetTree");
+    UObject* canvas = wt ? GetObjectProp(wt, "RootWidget") : nullptr;
+    for (auto& sp : g_slots) sp = nullptr;
+    if (canvas) BuildLobbySlots(canvas, buttonClass, pc);
+    else LOGF("[menu] no root canvas — lobby overview skipped");
     g_lastStatus = LobbyLine();
     LOGF("[menu] multiplayer entry added to the main menu (button=%p)", (void*)btn);
     return true;
@@ -174,6 +319,8 @@ static bool BuildButtons() {
 // ---------------------------------------------------------------- tick
 void Tick(float dt) {
     if (!g_enabled) return;
+    if (g_settle > 0) g_settle -= dt;
+    CheckInviteCommandLine();
     g_accum += dt;
     if (g_accum < 0.5) return;
     g_accum = 0;
@@ -186,11 +333,18 @@ void Tick(float dt) {
     // The player armed hosting from the menu; do it the moment a real map is up. Reusing the console
     // path rather than duplicating it keeps this on the one code path that is already proven (it also
     // selects the net driver and sets the travel port).
+    if (!g_pendingJoin.empty() && !inMenu && !inTransition && coop::CurrentRole() == coop::Role::None) {
+        std::string addr = g_pendingJoin;
+        g_pendingJoin.clear();
+        LOGF("[menu] map '%s' is up -> joining %s", wn.c_str(), addr.c_str());
+        LOGF("[menu] %s", console::Dispatch("connect " + addr, true).c_str());
+    }
     if (g_armHost && !inMenu && !inTransition && coop::CurrentRole() == coop::Role::None) {
         g_armHost = false;
         LOGF("[menu] map '%s' is up -> starting the listen server", wn.c_str());
         std::string r = console::Dispatch("listen 7777", true);
         LOGF("[menu] %s", r.c_str());
+        steamp2p::SetConnectPresence(steamp2p::ConnectString());
     }
 
     // Only present in the main menu map; the widget is destroyed with it, so rebuild when it returns.
@@ -201,6 +355,7 @@ void Tick(float dt) {
         BuildButtons();
         return;
     }
+    UpdateLobbySlots();
     std::string line = LobbyLine();
     if (line != g_lastStatus && g_statusButton && IsValidObject(g_statusButton)) {
         g_lastStatus = line;
@@ -213,6 +368,7 @@ static void CmdMenu(const console::Args& a, std::string& out) {
     if (a.size() > 1 && a[1] == "rebuild") { g_menu = g_button = g_statusButton = nullptr; out += BuildButtons() ? "rebuilt\n" : "no main menu here\n"; return; }
     if (a.size() > 2 && a[1] == "on")  { g_enabled = a[2] == "1"; out += Format("menu injection %s\n", g_enabled ? "on" : "off"); return; }
     if (a.size() > 1 && a[1] == "click") { OnMultiplayerClicked(); out += "simulated click\n"; return; }
+    if (a.size() > 1 && a[1] == "trace") { g_trace = a.size() > 2 ? a[2] == "1" : true; out += Format("trace %d\n", (int)g_trace); return; }
     if (a.size() > 1 && a[1] == "arm") { g_armHost = true; out += "host armed for next map\n"; return; }
     out += Format("world=%s menu=%p button=%p status=%p clicks=%llu status='%s'\n",
                   WorldName(GetWorld()).c_str(), (void*)g_menu, (void*)g_button, (void*)g_statusButton,
