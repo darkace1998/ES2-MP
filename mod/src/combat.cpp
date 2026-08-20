@@ -733,13 +733,139 @@ static void HostNpcHpTick(float dt) {
     if (g_npcHpLast.size() > 512) g_npcHpLast.clear();
 }
 
-// Play the death Blueprint on our own copy so the player sees the enemy blow up rather than vanish.
+
+// ---------------------------------------------------------------- damage feedback (numbers + hitmarker)
+// ES2 produces the floating damage number AND the hitmarker from one place:
+// UGameplayLib::DamageDealtByPlayerOrPlayerFriend classifies the victim's hitpoint component
+// (shield / armor / hull), calls AESHUD::ShowHitpointNumbers, then AESHUD::OnPlayerDealtDamage.
+// Whether it does any of that is decided by comparing the causer with UGameplayStatics::GetPlayerPawn
+// (world, 0) -- the LOCAL player. That is why a client sees neither: on the host the test fails for a
+// client's routed fire, so the host correctly stays silent, and the client never runs a damage path of
+// its own (it is blocked, see SetClientDamageBlock). Nobody is left to draw it.
+//
+// The host forwards the event instead, and the client draws it with ES2's own API.
+//
+// COALESCED, not per-event. A beam weapon calls this every tick; sending one reliable RPC per call is
+// exactly the flood that took clients down before (docs/NOTES.md). Damage is summed per victim and
+// flushed at 10 Hz, which is also how ES2 itself presents sustained fire.
+static uint64_t g_dmgSent = 0, g_dmgShown = 0;
+static bool g_dmgNumbers = true;
+struct DmgAccum { float shield = 0, armor = 0, hull = 0; bool crit = false; };
+static std::map<int, std::map<uint64_t, DmgAccum>> g_dmgPending;   // player id -> victim guid -> sum
+static double g_dmgFlushIn = 0;
+
+using Fn_DamageDealt = void (*)(UObject* hpComp, float amount, void* instigator, AActor* causer,
+                                AActor* victim, const void* hit, bool bCritical, bool bRadial);
+static Fn_DamageDealt o_DamageDealt = nullptr;
+
+static void H_DamageDealt(UObject* hpComp, float amount, void* instigator, AActor* causer,
+                          AActor* victim, const void* hit, bool bCritical, bool bRadial) {
+    o_DamageDealt(hpComp, amount, instigator, causer, victim, hit, bCritical, bRadial);
+    if (!g_dmgNumbers || amount <= 0.f || !hpComp || !victim || !causer) return;
+    players::Player* pl = players::ByPawn(causer);
+    if (!pl || pl->local || !pl->pc) return;            // the host's own damage: ES2 already drew it
+    uint64_t guid = NetGuidOf((const UObject*)victim);
+    if (!guid) return;
+    auto& byVictim = g_dmgPending[pl->id];
+    if (byVictim.size() >= 16 && byVictim.find(guid) == byVictim.end()) return;   // absurd fan-out guard
+    DmgAccum& a = byVictim[guid];
+    // Mirror ES2's own split: the single amount belongs to whichever layer took it.
+    if (IsA(hpComp, FindClass("ShieldComponent")))      a.shield += amount;
+    else if (IsA(hpComp, FindClass("ArmorComponent")))  a.armor  += amount;
+    else                                                a.hull   += amount;
+    a.crit = a.crit || bCritical;
+}
+
+// Host: drain the accumulator. Runs on the game thread, never from a message handler.
+static void HostDamageNumbersTick(float dt) {
+    if (g_dmgPending.empty()) return;
+    g_dmgFlushIn -= dt;
+    if (g_dmgFlushIn > 0) return;
+    g_dmgFlushIn = 0.1;                                  // 10 Hz
+    for (auto& [id, byVictim] : g_dmgPending) {
+        players::Player* pl = players::ById(id);
+        if (!pl || !pl->pc) continue;
+        for (auto& [guid, a] : byVictim) {
+            coop::SendToClient(pl->pc, Format("DM|%llu|%.1f|%.1f|%.1f|%d", (unsigned long long)guid,
+                                              a.shield, a.armor, a.hull, (int)a.crit));
+            ++g_dmgSent;
+        }
+    }
+    g_dmgPending.clear();
+}
+
+// Client: PC -> MyHUD is the AESHUD; its IngameHudWidget owns the pooled text panel that draws numbers.
+static bool FindDamageWidgets(UObject** hudOut, UObject** panelOut) {
+    UWorld* w = GetWorld();
+    APlayerController* pc = w ? GetFirstLocalPlayerController(w) : nullptr;
+    UObject* hud = pc ? UE_FIELD(UObject*, pc, es2off::APlayerController::MyHUD) : nullptr;
+    if (!hud || !IsValidObject(hud)) return false;
+    UObject* widget = nullptr, *panel = nullptr;
+    for (auto& p : GetProperties((UStruct*)GetClass(hud), true))
+        if (p.Name == "IngameHudWidget" && p.TypeName == "ObjectProperty") { widget = UE_FIELD(UObject*, hud, p.Offset); break; }
+    if (!widget || !IsValidObject(widget)) return false;
+    for (auto& p : GetProperties((UStruct*)GetClass(widget), true))
+        if (p.Name == "PooledHudText" && p.TypeName == "ObjectProperty") { panel = UE_FIELD(UObject*, widget, p.Offset); break; }
+    if (!panel || !IsValidObject(panel)) return false;
+    *hudOut = hud; *panelOut = panel;
+    return true;
+}
+
+struct PendingDmg { uint64_t guid; float shield, armor, hull; bool crit; };
+static std::vector<PendingDmg> g_pendingDmg;
+
+static bool ApplyDamageNumbers(const std::string& body) {
+    if (!g_dmgNumbers) return true;
+    unsigned long long guid = 0; float sh = 0, ar = 0, hu = 0; int crit = 0;
+    if (sscanf(body.c_str(), "%llu|%f|%f|%f|%d", &guid, &sh, &ar, &hu, &crit) != 5) return true;
+    if (g_pendingDmg.size() < 64) g_pendingDmg.push_back({guid, sh, ar, hu, crit != 0});
+    return true;
+}
+
+// Deferred for the usual reason: message handlers run inside the net code consuming a bunch, and these
+// calls run Blueprint graphs. See ClientDeathFxTick.
+void ClientDamageNumbersTick(float) {
+    if (g_pendingDmg.empty()) return;
+    std::vector<PendingDmg> due;
+    due.swap(g_pendingDmg);
+    UObject* hud = nullptr, *panel = nullptr;
+    if (!FindDamageWidgets(&hud, &panel)) return;
+    UFunction* addText = FindFunction(panel, "AddDamageTextWithActor");
+    UFunction* marker  = FindFunction(hud, "OnPlayerDealtDamage");
+    if (!addText) return;
+    for (const PendingDmg& d : due) {
+        AActor* victim = ActorFromNetGuid(d.guid);
+        if (!victim || !IsValidObject((UObject*)victim)) continue;
+        struct { AActor* Target; bool bIsCritical; float Shield, Armor, Hull; } parms{};
+        parms.Target = victim; parms.bIsCritical = d.crit;
+        parms.Shield = d.shield; parms.Armor = d.armor; parms.Hull = d.hull;
+        ProcessEvent(panel, addText, &parms);
+        if (marker) { bool bIsKill = false; ProcessEvent(hud, marker, &bIsKill); }   // the hitmarker
+        ++g_dmgShown;
+    }
+}
+
+// Play the destruction effect on our own copy so the player sees the enemy blow up rather than vanish.
+//
+// The host spawns a BP_Explosion_Base_C per kill, but that actor's CDO has RemoteRole ROLE_None, so it
+// never replicates -- a client sees the ship silently disappear when the host destroys it. The client
+// has to spawn its own.
+//
+// BP_ShipBase_C::SpawnExplosion is the right entry point, and the choice is not arbitrary:
+//   Die              is ESPawn's, takes THREE parameters (EventInstigator, InstigatorPawn,
+//                    DamageCauser) and was previously called here with a null parameter block. It did
+//                    nothing observable -- measured on the host, with hitpoints already at zero, the
+//                    actor survived and no explosion actor appeared.
+//   Explode          runs the whole sequence including DestroyAfterExploding, which destroys a
+//                    replicated actor on the client. The explosion appeared and then the client died
+//                    seconds later, once that timer fired.
+//   SpawnExplosion   takes no parameters and only spawns the effect. Verified live: explosion actor
+//                    count went up and the client stayed healthy.
 //
 // DEFERRED deliberately. Message handlers run inside UActorChannel::ReceivedBunch -> ReceivedRPC ->
-// execClientMessage, i.e. in the middle of the net code consuming a bunch. Die runs an entire Blueprint
-// that spawns effects and destroys actors, and doing that re-entrantly from inside RPC dispatch took the
-// client down with an access violation in ProcessEvent's own parameter memcpy. The same call is
-// perfectly safe one tick later, off the receive path.
+// execClientMessage, i.e. in the middle of the net code consuming a bunch. Running a Blueprint that
+// spawns effects re-entrantly from inside RPC dispatch took the client down with an access violation in
+// ProcessEvent's own parameter memcpy. The same call is safe one tick later, off the receive path.
 static std::vector<uint64_t> g_pendingDeaths;
 
 static bool ApplyNpcDeath(const std::string& body) {
@@ -758,10 +884,11 @@ void ClientDeathFxTick(float) {
     for (uint64_t guid : due) {
         AActor* act = ActorFromNetGuid(guid);
         if (!act || !IsValidObject((UObject*)act)) continue;
-        if (UFunction* fn = FindFunction((UObject*)act, "Die")) {
-            ProcessEvent((UObject*)act, fn, nullptr);
-            ++g_npcDeathsPlayed;
-        }
+        // Only ever call a no-parameter function here: ProcessEvent is handed a null parameter block.
+        UFunction* fn = FindFunction((UObject*)act, "SpawnExplosion");
+        if (!fn || UE_FIELD(uint8_t, fn, es2off::UFunction::NumParms) != 0) continue;
+        ProcessEvent((UObject*)act, fn, nullptr);
+        ++g_npcDeathsPlayed;
     }
 }
 
@@ -807,6 +934,7 @@ bool OnClientOp(const std::string& op, const std::string& body) {
     if (op == "WA") return ApplyNpcAim(body);
     if (op == "NH") return ApplyNpcHp(body);
     if (op == "ND") return ApplyNpcDeath(body);
+    if (op == "DM") return ApplyDamageNumbers(body);
     if (op == "HP") {
         // HP|<playerId>|<hull>|<shield>|<armor>
         // This used to skip the local player, which meant a client never saw its OWN bars move:
@@ -1113,6 +1241,11 @@ static void CmdCombat(const console::Args& a, std::string& out) {
     if (a.size() > 2 && a[1] == "route") g_routeFire = a[2] == "1";
     if (a.size() > 2 && a[1] == "localfire") g_localFire = a[2] == "1";
     if (a.size() > 2 && a[1] == "deathfx") { g_npcDeathFx = a[2] == "1"; out += Format("npc death fx %d\n", (int)g_npcDeathFx); return; }
+    // Diagnostic only: the block is normally driven purely by role. Lifting it lets a client run ES2's
+    // real damage path, which is how the impact/hitmarker/destruction visuals are produced -- and also
+    // how it reaches the null AESGameModeBase. Useful for measuring exactly where that path dies.
+    if (a.size() > 2 && a[1] == "dmgnumbers") { g_dmgNumbers = a[2] == "1"; out += Format("damage numbers %d\n", (int)g_dmgNumbers); return; }
+    if (a.size() > 2 && a[1] == "damageblock") { SetClientDamageBlock(a[2] == "1"); out += Format("client damage block %s\n", a[2].c_str()); return; }
     if (a.size() > 2 && a[1] == "npchp") { g_npcHpSync = a[2] == "1"; out += Format("npc hp sync %d\n", (int)g_npcHpSync); return; }
     if (a.size() > 2 && a[1] == "npcfollow") { g_npcFollow = a[2] == "1"; out += Format("npc follow %d\n", (int)g_npcFollow); return; }
     if (a.size() > 2 && a[1] == "followrate") { g_npcFollowRate = (float)atof(a[2].c_str()); out += Format("rate %.1f\n", g_npcFollowRate); return; }
@@ -1132,6 +1265,8 @@ static void CmdCombat(const console::Args& a, std::string& out) {
                   (unsigned long long)g_lockApplied, (unsigned long long)g_guidScans);
     out += Format("npcAimSync=%d npcAimSent=%llu npcAimApplied=%llu npcAimTracked=%d\n",
                   (int)g_npcAimSync, (unsigned long long)g_npcAimSent, (unsigned long long)g_npcAimApplied, (int)g_npcAim.size());
+    out += Format("dmgNumbers=%d dmgSent=%llu dmgShown=%llu\n", (int)g_dmgNumbers,
+                  (unsigned long long)g_dmgSent, (unsigned long long)g_dmgShown);
     out += Format("npcDeathFx=%d deathsSent=%llu deathsPlayed=%llu\n", (int)g_npcDeathFx,
                   (unsigned long long)g_npcDeathsSent, (unsigned long long)g_npcDeathsPlayed);
     out += Format("npcHpSync=%d npcHpSent=%llu npcHpApplied=%llu\n", (int)g_npcHpSync,
@@ -1242,6 +1377,8 @@ void Register() {
     console::RegisterTick("jitter", JitterTick);
     console::RegisterTick("npcfollow", NpcFollowTick);
     console::RegisterTick("deathfx", ClientDeathFxTick);
+    console::RegisterTick("dmgnum", ClientDamageNumbersTick);
+    console::RegisterTick("dmgnumhost", HostDamageNumbersTick);
     console::Register("aiminfo", "aiminfo [npc] - weapon FocusLocation per player, or per NPC keyed by NetGUID", CmdAimInfo);
     console::Register("hp", "hp [Class] - health/shield ratios of pawns in the world", CmdHp);
     console::Register("lock", "lock [playerId] - acquire closest target (host: on that player's server-side pawn)", CmdLock);
@@ -1252,6 +1389,8 @@ void Register() {
 void OnInit() {
     // installed but left OFF; coop enables it only while this process is a network client
     { void* orig = nullptr;
+      hooks::Install("UGameplayLib::DamageDealtByPlayerOrPlayerFriend", es2rva::UGameplayLib_DamageDealtByPlayerOrPlayerFriend,
+                     (void*)&H_DamageDealt, (void**)&o_DamageDealt);
       hooks::Install("UGameplayLib::ApplyESPointDamage", es2rva::UGameplayLib_ApplyESPointDamage, (void*)&H_ApplyESPointDamage, &orig);
       hooks::Enable("UGameplayLib::ApplyESPointDamage", false); }
     { void* orig = nullptr;

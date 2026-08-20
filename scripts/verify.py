@@ -229,6 +229,55 @@ def main():
     cb = con(CLIENT, 'combat')
     check('client-side damage suppressed / NPC fire mirroring on', 'npcFireMirror=1' in cb)
 
+    # Damage feedback. ES2 draws the floating number and the hitmarker from
+    # UGameplayLib::DamageDealtByPlayerOrPlayerFriend, which only fires for the LOCAL player -- so on the
+    # host it stays silent for a client's routed fire and the client, whose own damage path is blocked,
+    # had nothing to draw. The host now forwards each hit and the client draws it with ES2's own API.
+    # Every forwarded event must arrive: a gap means the coalescing or the deferred drain is dropping.
+    def counter(port, name):
+        m = re.search(rf'{name}=(\d+)', con(port, 'combat'))
+        return int(m.group(1)) if m else -1
+    # The client has to actually be ON something: firing from wherever it happens to sit hits nothing
+    # and the check measures no damage rather than a broken path.
+    # Prefer a TURRET: it does not move, so the client keeps hitting it. A scout dogfights away and the
+    # check ends up measuring "landed no hits" instead of the path being broken (same reason
+    # combat-test.py defaults to a turret).
+    def pick(pred):
+        for line in con(HOST, 'actors ESPawn 80').split('\n'):
+            if pred(line) and 'loc=(' in line:
+                mm = re.search(r'loc=\((-?\d+), (-?\d+), (-?\d+)\)', line)
+                if mm: return tuple(int(mm.group(i)) for i in (1, 2, 3))
+        return None
+    tgt = pick(lambda l: 'Turret' in l) or pick(lambda l: 'BP_Outlaw' in l)
+    sent0, shown0 = counter(HOST, 'dmgSent'), counter(CLIENT, 'dmgShown')
+    if tgt:
+        con(CLIENT, 'god 1')
+        con(CLIENT, f'tp {tgt[0] + 900} {tgt[1]} {tgt[2]}')
+        time.sleep(7)
+        con(CLIENT, 'aim')
+        time.sleep(2)
+        con(CLIENT, 'fire primary on')
+        for _ in range(4):
+            time.sleep(2); con(CLIENT, 'aim')      # re-aim: a drifting ship stops landing hits
+        con(CLIENT, 'fire primary off')
+        time.sleep(2)
+    sent1, shown1 = counter(HOST, 'dmgSent'), counter(CLIENT, 'dmgShown')
+    if sent1 > sent0:
+        check("client sees damage numbers for its own hits",
+              (shown1 - shown0) == (sent1 - sent0),
+              f'host forwarded {sent1 - sent0}, client drew {shown1 - shown0}')
+    else:
+        print('INFO  damage numbers: the client landed no hits this run — not exercised')
+
+    # The destruction explosion is a host-local actor (BP_Explosion_Base_C has RemoteRole ROLE_None), so
+    # it never replicates -- the client has to spawn its own or the enemy just blinks out.
+    ds = counter(HOST, 'deathsSent')
+    dp = counter(CLIENT, 'deathsPlayed')
+    if ds > 0:
+        check('client plays the destruction explosion', dp == ds, f'host reported {ds} deaths, client played {dp}')
+    else:
+        print('INFO  destruction explosion: nothing died during this run — not exercised')
+
     rs = con(HOST, 'respawn')
     check('co-op death handling armed', 'respawn=1' in rs and 'vetoGameOverPawn=1' in rs, rs.strip().split('\n')[0][:90])
     at = con(HOST, 'attribution')

@@ -178,6 +178,31 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
   thermo gun fires under a coil gun's reticle. The value is the equipped `FWeaponInfo::WeaponItem`'s
   `UItem::GetSubCategoryID()` (`cat_coil_gun`, `cat_thermo_gun`, …); the mod pushes it at 5 Hz and only
   when it differs. `reticle` on the console reports every stage of that lookup.
+- **ES2 draws the floating damage number and the hitmarker from one function**, and it is not on the
+  damage path proper: `UGameplayLib::DamageDealtByPlayerOrPlayerFriend` (RVA 0x15572A0, ICF-unique)
+  classifies the victim's hitpoint component (`IsA<UShieldComponent>` / `UArmorComponent` /
+  `UHealthComponent`) to decide which slot the single float belongs in, then calls
+  `AESHUD::ShowHitpointNumbers` and `AESHUD::OnPlayerDealtDamage` (that second one IS the hitmarker).
+  It gates all of it on comparing the causer with `UGameplayStatics::GetPlayerPawn(world, 0)` — the
+  LOCAL player. That is why a co-op client saw neither: on the host the test fails for the client's
+  routed fire, so the host correctly stays silent, and the client's own damage path is blocked. Nobody
+  was left to draw it. The host now forwards each hit (`DM`) and the client draws it with ES2's own
+  `UPooledHUDTextPanel::AddDamageTextWithActor`. Coalesce before sending — a beam weapon calls this
+  every tick and one reliable RPC per call is the flood that used to kill clients.
+- **Damage numbers are pooled, not spawned**, which is why diffing live widget classes across a hit
+  finds nothing. The pool is `WG_Ingame_HUD_C -> PooledHudText`; `ActiveTexts` (non-empty for about a
+  second) is the observable that tells you a number is on screen.
+- **`ESPawn::Die` takes three parameters and does nothing useful anyway.** Measured on the host with
+  hitpoints already at zero: the actor survived and no explosion appeared. The mod used to call it with
+  a null parameter block. `BP_ShipBase_C` is where the real sequence lives: `Explode` runs all of it
+  including `DestroyAfterExploding`, which destroys a REPLICATED actor on the client and killed it
+  seconds later when the timer fired. **`SpawnExplosion` (no parameters, effect only) is the one to
+  call.** Only ever pass a null parameter block to a function with `NumParms == 0`.
+- **`BP_Explosion_Base_C` has `RemoteRole = ROLE_None`** — destruction explosions never replicate, so a
+  client must spawn its own or enemies simply blink out of existence.
+- **Never lift the client damage block wholesale to get the visuals back.** Measured: the client dies
+  within five seconds, because mirrored NPC fire impacts locally and ES2's damage chain reaches the
+  `AESGameModeBase` a client does not have. Forward the presentation instead of unblocking simulation.
 - Console `peek` reads raw memory and `class <0xaddr>` resolves a Blueprint class from an instance —
   both needed because native C++ members (`FWeaponInfo::SpawnedWeapons`) have no UProperty and Blueprint
   classes are not in the native class registry. `peek` VirtualQuery-checks the span first; probing a

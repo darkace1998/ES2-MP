@@ -11,4 +11,5 @@ bool OnClientOp(const std::string& op, const std::string& body);
 void Tick(float dt, bool isHost);
 void ClientAimTick(float dt);   // client: stream where our weapons point, so the host can aim them
 void SetClientDamageBlock(bool on);
+void ClientDamageNumbersTick(float dt);
 }
