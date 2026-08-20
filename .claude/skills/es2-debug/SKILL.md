@@ -15,6 +15,16 @@ description: Read Everspace 2 co-op mod logs and diagnose crashes (symbolized ca
 - Raw crash dumps: `$ES2_SAVED/Crashes/UECC-*` (source `scripts/proton-env.sh` for `$ES2_SAVED`).
 - Proton stdout/stderr per instance: `run/<name>.proton.log`.
 
+## Mod-specific crash signatures already seen (and fixed)
+- `Maximum number of UObjects exceeded` while a client joins -> a hook re-entered engine code that calls
+  back into the hooked function (the GetCurrentShip/CreateShipDataFromState recursion). Add a re-entrancy guard.
+- Fault inside `AESHUD::Tick` on the client -> the local player had no pawn (respawn/death/travel gap).
+- Fault inside `FURL::FURL` during `UGameEngine::Tick` -> a level was opened without ES2's
+  `ChangeLocation_Internal` having updated PlayerData first.
+- Heap corruption in `FMallocBinned2` -> almost always a wrong parameter ABI: MSVC x64 passes
+  `FString`/`TSubclassOf` "by value" params INDIRECTLY, and large struct returns use a hidden pointer
+  (`(this, sret)` for member functions, `(sret)` for static ones).
+
 ## Common failure signatures (see the es2-modding-facts memory)
 - `Pure virtual not implemented (UNetConnection::LowLevelGetRemoteAddress)` → you called a pure-virtual by its base RVA; call it through the vtable slot instead (`tools/pdb_types.py vtable`).
 - `dwmapi + <off>` in a crash → symbolize with `python3 tools/symbolize_dll.py mod/build/dwmapi.pdb 0x<off>`.
