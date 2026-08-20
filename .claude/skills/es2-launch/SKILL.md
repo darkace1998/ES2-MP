@@ -19,7 +19,13 @@ The install path contains `™`, which breaks `proton run`; everything launches 
 `scripts/coop-session.sh --kill`
 - Kills stragglers, launches host (27100) + client (27101), loads the same save in each, host `listen 7777`, client `connect 127.0.0.1:7777`, prints client status + host net table.
 - Flags: `--host-only`, `--no-connect`, `--nullrhi-host`, `--save <NAME>`.
-- A save must exist; default `ES2__AUTO_2023.04.08-23.33.57`. Back up saves first if needed (`run/backup`).
+- A save must exist. **Do not hardcode a save name**: ES2 rotates its autosaves, so an old name eventually
+  disappears and the game asserts `Savegame load failed ... may be missing or corrupt` (it dies during load,
+  before the console world check). The script defaults to the newest `ES2__AUTO_*` present and reads the
+  location out of its `ES2__PREVIEW__*` sidecar (`CurrentLocation` / `NameProperty` / `<id>`), so it waits
+  for the right world automatically.
+- For the regression suite pin a save known to pass: `--save ES2__AUTO_2026.08.20-12.44.41` (S01ML01).
+  A copy of it plus `MetaData.sav` is kept in `run/backup/SaveGames/` — restore from there if rotation eats it.
 
 ## Stop / observe
 - Stop all game instances: `scripts/kill.sh` (matches the wine process, never this shell).
