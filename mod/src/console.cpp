@@ -10,6 +10,7 @@
 #include <thread>
 #include <atomic>
 #include <sstream>
+#include <algorithm>
 
 namespace console {
 struct Cmd { std::string help; Handler h; bool onGameThread; };
@@ -52,16 +53,23 @@ static Args Tokenize(const std::string& line) {
     return out;
 }
 
+// Look a command up WITHOUT holding g_cmdsMutex across anything else: HelpText() takes the same
+// (non-recursive) mutex, so building the "unknown command" reply inside the locked scope self-deadlocked
+// the calling thread — one typo then hung every later console command and, once the game thread
+// blocked on a queued job, the game itself.
+static bool LookupCmd(const std::string& name, Cmd* out) {
+    std::lock_guard<std::mutex> lk(g_cmdsMutex);
+    auto it = g_cmds.find(name);
+    if (it == g_cmds.end()) return false;
+    if (out) *out = it->second;
+    return true;
+}
+
 static std::string RunNow(const std::string& line) {
     Args a = Tokenize(line);
     if (a.empty()) return "";
     Cmd cmd;
-    {
-        std::lock_guard<std::mutex> lk(g_cmdsMutex);
-        auto it = g_cmds.find(a[0]);
-        if (it == g_cmds.end()) return "unknown command: " + a[0] + "\n" + HelpText();
-        cmd = it->second;
-    }
+    if (!LookupCmd(a[0], &cmd)) return "unknown command: " + a[0] + "\n" + HelpText();
     std::string out;
     try { cmd.h(a, out); } catch (const std::exception& e) { out += std::string("exception: ") + e.what() + "\n"; } catch (...) { out += "unknown exception\n"; }
     return out;
@@ -70,20 +78,22 @@ static std::string RunNow(const std::string& line) {
 std::string Dispatch(const std::string& line, bool alreadyOnGameThread) {
     Args a = Tokenize(line);
     if (a.empty()) return "";
-    bool needGT = true;
-    {
-        std::lock_guard<std::mutex> lk(g_cmdsMutex);
-        auto it = g_cmds.find(a[0]);
-        if (it == g_cmds.end()) return "unknown command: " + a[0] + "\n" + HelpText();
-        needGT = it->second.onGameThread;
-    }
-    if (!needGT || alreadyOnGameThread || IsGameThread()) return RunNow(line);
+    Cmd cmd;
+    if (!LookupCmd(a[0], &cmd)) return "unknown command: " + a[0] + "\n" + HelpText();
+    if (!cmd.onGameThread || alreadyOnGameThread || IsGameThread()) return RunNow(line);
     auto job = std::make_shared<Job>();
     job->line = line;
     { std::lock_guard<std::mutex> lk(g_queueMutex); g_queue.push_back(job); }
     std::unique_lock<std::mutex> lk(job->m);
-    if (!job->cv.wait_for(lk, std::chrono::seconds(30), [&] { return job->done; }))
+    if (!job->cv.wait_for(lk, std::chrono::seconds(30), [&] { return job->done; })) {
+        // Withdraw the job if the game thread has not picked it up yet. Otherwise it would still run
+        // whenever the tick resumes (after a loading screen, say) — long after the caller was told it
+        // failed and probably re-issued it, so `listen`/`connect`/`LoadGame` ran twice.
+        { std::lock_guard<std::mutex> q(g_queueMutex);
+          auto it = std::find(g_queue.begin(), g_queue.end(), job);
+          if (it != g_queue.end()) g_queue.erase(it); }
         return "ERROR: timeout waiting for game thread (is the game ticking? loading screen?)\n";
+    }
     return job->out;
 }
 
@@ -142,18 +152,26 @@ static void AcceptThread(SOCKET ls) {
 
 int Port() { return g_port; }
 
-void Start(int basePort) {
+void Start(int basePort, bool scan) {
     WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
     SOCKET ls = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (ls == INVALID_SOCKET) { LOGF("console: socket() failed %d", WSAGetLastError()); return; }
     BOOL one = 1; setsockopt(ls, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char*)&one, sizeof one);
     sockaddr_in addr{}; addr.sin_family = AF_INET; addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     int port = 0;
-    for (int p = basePort; p < basePort + 10; ++p) {
+    // When the port was requested explicitly (ES2COOP_CONSOLE_PORT, i.e. launched by the harness) bind
+    // exactly that one: the scripts record the REQUESTED port, so quietly taking the next free one made
+    // the harness drive a stale instance on 27100 while the fresh host sat on 27101.
+    const int span = scan ? 10 : 1;
+    for (int p = basePort; p < basePort + span; ++p) {
         addr.sin_port = htons((u_short)p);
         if (bind(ls, (sockaddr*)&addr, sizeof addr) == 0) { port = p; break; }
     }
-    if (!port) { LOGF("console: no free port in %d..%d", basePort, basePort + 9); closesocket(ls); return; }
+    if (!port) {
+        if (scan) LOGF("console: no free port in %d..%d", basePort, basePort + span - 1);
+        else LOGF("console: port %d is taken (stale instance? run scripts/kill.sh) — console DISABLED, err %d", basePort, WSAGetLastError());
+        closesocket(ls); return;
+    }
     if (listen(ls, 4) != 0) { LOGF("console: listen failed %d", WSAGetLastError()); closesocket(ls); return; }
     g_port = port;
     // write port file for tooling

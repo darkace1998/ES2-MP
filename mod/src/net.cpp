@@ -175,7 +175,9 @@ static bool H_Listen(UWorld* w, void* url) {
 // ---------------------------------------------------------------- net driver selection
 // GEngine->NetDriverDefinitions: GameNetDriver -> SteamNetDriver by default (Steam P2P).  For IP play we switch it to IpNetDriver.
 static std::string g_netDriverMode = "ip";
-static bool ApplyNetDriverMode(const std::string& mode, std::string& out) {
+// persist=false applies the definition for the next net driver without making it the new default or
+// touching the Steam accept gate — what `connect steam.<id>` needs (a joiner is not a host).
+static bool ApplyNetDriverMode(const std::string& mode, std::string& out, bool persist = true) {
     UEngine* e = GetEngine();
     if (!e) { out += "no engine\n"; return false; }
     struct Def { FName DefName, DriverClassName, DriverClassNameFallback; int32_t MaxChannelsOverride; };
@@ -196,8 +198,7 @@ static bool ApplyNetDriverMode(const std::string& mode, std::string& out) {
         }
         out += Format("  netdriverdef %s -> %s (fallback %s)\n", d.DefName.ToString().c_str(), d.DriverClassName.ToString().c_str(), d.DriverClassNameFallback.ToString().c_str());
     }
-    if (found) g_netDriverMode = mode;
-    steamp2p::SetHosting(g_netDriverMode == "steam");
+    if (found && persist) { g_netDriverMode = mode; steamp2p::SetHosting(g_netDriverMode == "steam"); }
     return found;
 }
 static void CmdNetDriver(const console::Args& a, std::string& out) {
@@ -222,7 +223,9 @@ static void CmdConnect(const console::Args& a, std::string& out) {
     if (a.size() < 2) { out = "usage: connect <ip[:port]>\n"; return; }
     std::string addr = a[1];
     if (addr.find(':') == std::string::npos && addr.rfind("steam.", 0) != 0) addr += ":7777";
-    ApplyNetDriverMode(addr.rfind("steam.", 0) == 0 ? "steam" : g_netDriverMode, out);
+    // The address decides the driver for THIS connection only. Persisting it left a former Steam joiner
+    // on SteamNetDriver for a later LAN `listen`, and opened its P2P accept gate as if it were hosting.
+    ApplyNetDriverMode(addr.rfind("steam.", 0) == 0 ? "steam" : "ip", out, /*persist=*/false);
     travel::SetHostAddress(addr);
     ExecConsoleCommand("open " + addr);
     out += "issued: open " + addr + "\n";

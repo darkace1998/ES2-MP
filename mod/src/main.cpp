@@ -65,10 +65,12 @@ DWORD WINAPI InitThread(LPVOID) {
     attribution::Register();
     steamp2p::Register();
 
-    // console port: base 27100 (+0.. depending on free)
+    // console port: 27100 (scanning upwards for a free one) unless ES2COOP_CONSOLE_PORT pins it — then
+    // it is exactly that port, so the harness and the mod can never disagree about which instance is which.
     int basePort = 27100;
-    if (const wchar_t* env = _wgetenv(L"ES2COOP_CONSOLE_PORT")) basePort = _wtoi(env);
-    console::Start(basePort);
+    bool pinned = false;
+    if (const wchar_t* env = _wgetenv(L"ES2COOP_CONSOLE_PORT")) { int p = _wtoi(env); if (p > 0) { basePort = p; pinned = true; } }
+    console::Start(basePort, !pinned);
 
     // Wait for the engine to exist before hooking the tick (GEngine set during FEngineLoop::Init)
     for (int i = 0; i < 600 && !ue::GetEngine(); ++i) Sleep(100);

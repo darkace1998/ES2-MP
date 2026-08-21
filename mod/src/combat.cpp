@@ -608,6 +608,109 @@ static double g_npcMaxExtrap = 0.25;      // cap dead-reckoning; a stale target 
 static double g_npcSnapDist = 15000.0;    // past this, jump rather than slide
 static uint64_t g_npcFollowed = 0, g_npcFollowSnaps = 0;
 static double g_npcNow = 0;
+// Both OFF by default — kept as instrumented experiments, because measurement did not support them.
+//
+// The hypothesis was that correcting POSITION alone leaves the proxy's rigid body integrating with its
+// own stale velocity (these really do simulate on the client: bSimulatePhysics=true, bRepPhysics=true),
+// so body and corrector fight and that fight is the jitter — the remote-player path writes the body's
+// velocity too (coop.cpp SmoothRemotePawns -> SetPhysVelocity). Measured on a moving scout, interleaved,
+// two rounds each: deviation from the replicated state 513 u (position only) vs 580 u (position+velocity
+// +rotation), step spread sd/mean 0.67 vs 0.68. No improvement, if anything slightly worse — and the
+// reason is the ordering: NpcFollowTick runs from the UGameEngine::Tick detour BEFORE the world ticks,
+// so physics then integrates a whole frame AFTER our write, and handing it the full replicated velocity
+// makes it overshoot the target by ~v*dt (~600 u at the 20 fps this box manages with two instances).
+//
+// What DID work is making the proxy kinematic (`call 0x<rootcomp> SetSimulatePhysics 0`), i.e. removing
+// the competing integration altogether: sd/mean 0.74 -> 0.30 and worst jerk 3.30x -> 1.87x mean on the
+// same actor. See docs/NOTES.md; that is the direction to take, and rotation following becomes mandatory
+// there because nothing else would orient the proxy.
+static bool g_npcFollowVel = false;
+static bool g_npcFollowRot = false;
+
+// THE fix for NPC jitter: take the local physics simulation out of the loop entirely on the client.
+//
+// These proxies really do simulate here (bSimulatePhysics=true, bRepPhysics=true), so every frame the
+// body integrates itself and our correction drags it back — and because NpcFollowTick runs from the
+// UGameEngine::Tick detour BEFORE the world ticks, physics always gets the last word. Correcting harder
+// cannot win that (measured: writing the authoritative velocity made it slightly WORSE). Making the body
+// kinematic removes the competing integration, and then the transform we write IS what gets drawn.
+// Measured on one moving scout, same actor, back to back: step spread sd/mean 0.74 -> 0.30 and worst
+// frame-to-frame jerk 3.30x -> 1.87x mean. The cost is a little more lag, which is now purely the chase
+// rate (`combat followrate N`) since nothing else moves the actor.
+//
+// Applies to every simulated proxy this tick drives, which on a client includes the OTHER player's ship
+// (a client's registry holds only itself, so partner ships come through here too and have exactly the
+// same problem). It never touches our own ship: that is ROLE_AutonomousProxy and is filtered out below,
+// and it must keep simulating because the client is authoritative over its own movement.
+static bool g_npcKinematic = true;
+static bool g_npcLeadFrame = true;        // predict one frame ahead (we write before the world ticks)
+static uint64_t g_kinematicSet = 0, g_kinematicRestored = 0;
+static std::vector<AActor*> g_madeKinematic;      // so the toggle can put them back
+
+static void* RootPrim(AActor* a) { return a ? UE_FIELD(void*, a, es2off::AActor::RootComponent) : nullptr; }
+// Read the flag rather than calling IsSimulatingPhysics: this runs per proxy per frame, and a field read
+// costs nothing.
+static bool IsSimulating(AActor* a) {
+    void* root = RootPrim(a);
+    if (!root) return false;
+    return (UE_FIELD(uint8_t, root, es2off::UPrimitiveComponent::BodyInstance + es2off::FBodyInstance::bSimulatePhysics_off)
+            & es2off::FBodyInstance::bSimulatePhysics_mask) != 0;
+}
+// VIRTUAL, and ES2 overrides it (UMovementRootComponent::SetSimulatePhysics) — these ship roots are
+// exactly that class, so this must dispatch through the vtable. Calling the UPrimitiveComponent RVA
+// directly would silently run the base implementation instead of ES2's.
+static void SetSimulate(AActor* a, bool sim) {
+    if (void* root = RootPrim(a))
+        VCall<void, bool>(root, vt::UPrimitiveComponent_SetSimulatePhysics, sim);
+}
+// Restore everything we converted (toggle off / leaving the role). Actors that died in the meantime are
+// simply skipped -- they are gone, and their bodies with them.
+static void RestoreSimulation() {
+    for (AActor* a : g_madeKinematic) {
+        if (!a || !IsValidObject((UObject*)a)) continue;
+        SetSimulate(a, true);
+        ++g_kinematicRestored;
+    }
+    g_madeKinematic.clear();
+}
+static float g_npcRotRate = 18.f;         // rotation convergence, matching the remote-player smoother
+static uint64_t g_npcVelWrites = 0, g_npcRotWrites = 0;
+
+using Fn_SetPhysLinVel = void (*)(void* prim, const FVector* v, bool add, FName bone);
+static void SetPhysVelocityOn(AActor* a, const FVector& v) {
+    void* root = UE_FIELD(void*, a, es2off::AActor::RootComponent);
+    if (root) Rva<std::remove_pointer_t<Fn_SetPhysLinVel>>(es2rva::UPrimitiveComponent_SetPhysicsLinearVelocity)(root, &v, false, FName{});
+}
+
+// FRepMovement carries the rotation as an FRotator in DEGREES; FTransform wants a quaternion.
+// This is UE's own FRotator::Quaternion() term for term.
+static FQuat RotatorToQuat(const FRotator& r) {
+    const double k = 3.14159265358979323846 / 360.0;      // deg -> rad, halved
+    double sp = sin(r.Pitch * k), cp = cos(r.Pitch * k);
+    double sy = sin(r.Yaw   * k), cy = cos(r.Yaw   * k);
+    double sr = sin(r.Roll  * k), cr = cos(r.Roll  * k);
+    return FQuat{ cr * sp * sy - sr * cp * cy,
+                 -cr * sp * cy - sr * cp * sy,
+                  cr * cp * sy - sr * sp * cy,
+                  cr * cp * cy + sr * sp * sy };
+}
+static FQuat SlerpQuat(FQuat a, const FQuat& b, double t) {
+    double d = a.X * b.X + a.Y * b.Y + a.Z * b.Z + a.W * b.W;
+    if (d < 0) { a.X = -a.X; a.Y = -a.Y; a.Z = -a.Z; a.W = -a.W; d = -d; }
+    FQuat r;
+    if (d > 0.9995) {                                     // nearly parallel: lerp + normalise
+        r.X = a.X + (b.X - a.X) * t; r.Y = a.Y + (b.Y - a.Y) * t;
+        r.Z = a.Z + (b.Z - a.Z) * t; r.W = a.W + (b.W - a.W) * t;
+    } else {
+        double th0 = acos(d), th = th0 * t, s0 = sin(th0);
+        double sa = sin(th0 - th) / s0, sb = sin(th) / s0;
+        r.X = a.X * sa + b.X * sb; r.Y = a.Y * sa + b.Y * sb;
+        r.Z = a.Z * sa + b.Z * sb; r.W = a.W * sa + b.W * sb;
+    }
+    double n = sqrt(r.X * r.X + r.Y * r.Y + r.Z * r.Z + r.W * r.W);
+    if (n > 1e-9) { r.X /= n; r.Y /= n; r.Z /= n; r.W /= n; }
+    return r;
+}
 
 struct NpcTarget {
     FVector loc{}, vel{};
@@ -642,9 +745,21 @@ void NpcFollowTick(float dt) {
         if (!act || !IsValidObject((UObject*)act)) continue;
         if (GetRole(act) != 1 /*ROLE_SimulatedProxy*/) continue;      // only proxies the server owns
 
+        // Checked per frame rather than once, so this also self-heals: whatever re-enables simulation
+        // (a replicated physics update, ES2's own code, a level transition) is simply undone next frame.
+        // IsSimulatingPhysics is a virtual reading a flag on the body -- cheap enough for a handful of NPCs.
+        if (g_npcKinematic && IsSimulating(act)) {
+            SetSimulate(act, false);
+            ++g_kinematicSet;
+            bool known = false;
+            for (AActor* k : g_madeKinematic) if (k == act) { known = true; break; }
+            if (!known && g_madeKinematic.size() < 256) g_madeKinematic.push_back(act);
+        }
+
         void* rm = reinterpret_cast<char*>(act) + es2off::AActor::ReplicatedMovement;
         const FVector& rl = UE_FIELD(FVector, rm, es2off::FRepMovement::Location);
         const FVector& rv = UE_FIELD(FVector, rm, es2off::FRepMovement::LinearVelocity);
+        const FRotator& rr = UE_FIELD(FRotator, rm, es2off::FRepMovement::Rotation);
         if (rl.X == 0 && rl.Y == 0 && rl.Z == 0) continue;            // nothing replicated yet
 
         NpcTarget& t = g_npcTargets[act];
@@ -652,7 +767,11 @@ void NpcFollowTick(float dt) {
             t.loc = rl; t.vel = rv; t.at = g_npcNow; t.has = true;    // a fresh update landed
         }
 
-        double age = g_npcNow - t.at;
+        // + dt: this tick runs from the UGameEngine::Tick detour, i.e. BEFORE the world ticks and draws,
+        // so whatever we write here is what the player sees one frame from now — aim the prediction at
+        // that moment. Costs nothing in smoothness (it is a constant lead, not a faster chase) and takes
+        // out most of the standing lag, which matters more now that no physics carries the proxy forward.
+        double age = (g_npcNow - t.at) + (g_npcLeadFrame ? dt : 0.0);
         if (age > g_npcMaxExtrap) age = g_npcMaxExtrap;
         FVector predicted{ t.loc.X + t.vel.X * age, t.loc.Y + t.vel.Y * age, t.loc.Z + t.vel.Z * age };
 
@@ -662,7 +781,21 @@ void NpcFollowTick(float dt) {
         FTransform next = cur;
         if (err > g_npcSnapDist) { next.Translation = predicted; ++g_npcFollowSnaps; }
         else next.Translation = FVector{ cur.Translation.X + dx * a, cur.Translation.Y + dy * a, cur.Translation.Z + dz * a };
+        // A kinematic proxy has nothing else to orient it (its AI runs on the host), so rotation
+        // following is not optional there.
+        if (g_npcFollowRot || g_npcKinematic) {
+            FQuat want = RotatorToQuat(rr);
+            // A zeroed rotator is what an actor that has not replicated its rotation yet looks like;
+            // snapping such a proxy to identity would be worse than leaving it where it is.
+            if (!(rr.Pitch == 0 && rr.Yaw == 0 && rr.Roll == 0)) {
+                double ra = dt * g_npcRotRate; if (ra > 1) ra = 1;
+                next.Rotation = (err > g_npcSnapDist) ? want : SlerpQuat(cur.Rotation, want, ra);
+                ++g_npcRotWrites;
+            }
+        }
         SetActorTransform(act, next, false, 1 /*TeleportPhysics*/);
+        // Only meaningful while the body still simulates; see the measurement note above (it did not help).
+        if (g_npcFollowVel && !g_npcKinematic) { SetPhysVelocityOn(act, rv); ++g_npcVelWrites; }
         ++g_npcFollowed;
     }
     if (g_npcTargets.size() > 512) g_npcTargets.clear();
@@ -690,6 +823,38 @@ struct NpcHp { float hull = -1, shield = -1, armor = -1; bool announcedDead = fa
 static std::map<AActor*, NpcHp> g_npcHpLast;
 static std::vector<AActor*> g_hostNpcCache;
 static double g_hostNpcCacheAge = 0;
+
+
+// Announcing a death by POLLING is too late. HostNpcHpTick runs at 8 Hz over 8 NPCs a tick, so an ND
+// could go out ~125 ms after the kill, and the client then defers one more frame off the receive path.
+// By then the host has usually destroyed the actor and replication has taken the client's copy with it,
+// so ActorFromNetGuid finds nothing and no explosion plays -- measured as 3 deaths, 1 explosion.
+//
+// Hooking the depletion delegate announces it in the frame it happens. The polled path below stays as a
+// backstop (and still owns the hitpoint stream); both share the announcedDead latch so nothing doubles.
+//
+// The SAME delegate type is used for shield and armor depletion, so the owner's HULL must be checked --
+// a dropped shield is not a death.
+static void AnnounceNpcDeath(AActor* act) {
+    if (!act || !IsValidObject((UObject*)act)) return;
+    if (!g_npcHpSync || players::Count() < 2) return;
+    if (players::ByPawn(act)) return;                       // a player dying is the respawn path's job
+    if (GetHealthRatio(act) > 0.001f) return;               // shield/armor depleted, not the hull
+    NpcHp& last = g_npcHpLast[act];
+    if (last.announcedDead) return;
+    uint64_t guid = NetGuidOf((const UObject*)act);
+    if (!guid) return;
+    last.announcedDead = true;
+    coop::SendToAllClients(Format("ND|%llu", (unsigned long long)guid));
+    ++g_npcDeathsSent;
+}
+
+using Fn_HealthDepleted = void (*)(const void* self, AActor* owner, AActor* causer, void* instigator, float f);
+static Fn_HealthDepleted o_HealthDepleted = nullptr;
+static void H_HealthDepleted(const void* self, AActor* owner, AActor* causer, void* instigator, float f) {
+    AnnounceNpcDeath(owner);
+    o_HealthDepleted(self, owner, causer, instigator, f);
+}
 
 static void HostNpcHpTick(float dt) {
     if (!g_npcHpSync || players::Count() < 2) return;
@@ -912,27 +1077,141 @@ void ClientDamageNumbersTick(float) {
 // ProcessEvent's own parameter memcpy. The same call is safe one tick later, off the receive path.
 static std::vector<uint64_t> g_pendingDeaths;
 
+static uint64_t g_deathsRx = 0, g_deathsNoActorAtRx = 0, g_deathsNoActorAtDrain = 0;
+
+// --- when to play it, and what to play -------------------------------------------------------
+//
+// TIMING. The host announces on hull<=0, deliberately early so the guid still resolves — but hull-zero
+// is where ES2's death sequence STARTS. The ship then tumbles out of control and only explodes and is
+// destroyed at the end of it. Firing our explosion on the announcement therefore played it seconds too
+// early: the player saw the blast, then the ship tumbling on past it, then vanishing. (The kinematic
+// proxies made this obvious, because the tumble is now smooth and legible rather than lost in jitter.)
+//
+// So the announcement no longer plays anything: it just marks that actor as "the host says this one is
+// dead". The FX is played from AESPawn::Destroyed, i.e. the moment our copy actually goes away, which is
+// exactly when the host destroyed it. That also removes the resolution race entirely — inside Destroyed
+// the actor is still fully valid, so there is no "could not resolve the guid in time" case left.
+//
+// The marking matters: a proxy is also destroyed when it merely leaves relevancy, and that must NOT
+// produce an explosion. Only actors the host explicitly announced are in the set.
+//
+// WHAT. `SpawnExplosion` is a BP_ShipBase_C function, so only the ship branch has it — turrets
+// (BP_TurretBase_C) and anemones (BP_Cave_Anemone_Base_C) hang off BP_PawnBase_C directly and have none.
+// The old code silently `continue`d for those, so they vanished with no explosion and no counter said so.
+// Now the class-independent fallback spawns the same explosion actor the host does.
+static std::map<AActor*, uint64_t> g_dying;        // actor -> guid, announced dead by the host
+static std::map<AActor*, double> g_dyingSince;
+static double g_fxNow = 0;
+static double g_dyingDeadline = 8.0;               // safety net: never lose an explosion outright
+static uint64_t g_fxAtDestroy = 0, g_fxTimeout = 0, g_fxNoFunction = 0, g_fxFallback = 0, g_fxFallbackFailed = 0;
+static bool g_fxFallbackOn = true;
+
+// The host spawns a BP_Explosion_Base_C per kill; it has RemoteRole ROLE_None, which is exactly why it
+// never reaches a client. Resolved by scanning for the class object (a Blueprint-generated class, so
+// FindClass's native-only short-name path cannot see it).
+static UClass* g_explosionClass = nullptr;
+static bool g_explosionSearched = false;
+static UClass* ExplosionClass() {
+    if (g_explosionSearched) return g_explosionClass;
+    g_explosionSearched = true;
+    UClass* cc = ClassClass();
+    if (!cc) { g_explosionSearched = false; return nullptr; }   // too early; try again later
+    ForEachObject([&](UObject* o) {
+        if (!IsA(o, cc)) return true;
+        if (GetName(o) != "BP_Explosion_Base_C") return true;
+        g_explosionClass = (UClass*)o;
+        return false;
+    });
+    LOGF("[combat] explosion fallback class %s", g_explosionClass ? GetPathName((UObject*)g_explosionClass).c_str() : "NOT FOUND");
+    return g_explosionClass;
+}
+
+using Fn_BeginDeferredSpawn = AActor* (*)(const UObject* wco, UClass* const* cls, const FTransform* xf,
+                                          int collisionHandling, AActor* owner, int scaleMethod);
+using Fn_FinishSpawningActor = AActor* (*)(AActor* actor, const FTransform* xf, int scaleMethod);
+
+static bool SpawnExplosionAt(const FTransform& at) {
+    UClass* cls = ExplosionClass();
+    UWorld* w = GetWorld();
+    if (!cls || !w) return false;
+    UClass* arg = cls;                       // TSubclassOf is passed by hidden pointer
+    AActor* a = Rva<std::remove_pointer_t<Fn_BeginDeferredSpawn>>(es2rva::UGameplayStatics_BeginDeferredActorSpawnFromClass)(
+        (const UObject*)w, &arg, &at, 1 /*AdjustIfPossibleButAlwaysSpawn*/, nullptr, 0);
+    if (!a) return false;
+    Rva<std::remove_pointer_t<Fn_FinishSpawningActor>>(es2rva::UGameplayStatics_FinishSpawningActor)(a, &at, 0);
+    return true;
+}
+
+// Play whatever this class can manage, at `act`'s current transform. Called with the actor still alive.
+static void PlayDeathFx(AActor* act) {
+    if (!act || !IsValidObject((UObject*)act)) return;
+    UFunction* fn = FindFunction((UObject*)act, "SpawnExplosion");
+    if (fn && UE_FIELD(uint8_t, fn, es2off::UFunction::NumParms) == 0) {
+        ProcessEvent((UObject*)act, fn, nullptr);   // only ever a null parm block for NumParms==0
+        ++g_npcDeathsPlayed;
+        return;
+    }
+    ++g_fxNoFunction;                                // e.g. turrets, anemones: no BP_ShipBase_C in the chain
+    if (!g_fxFallbackOn) return;
+    if (SpawnExplosionAt(GetActorTransform(act))) { ++g_fxFallback; ++g_npcDeathsPlayed; }
+    else ++g_fxFallbackFailed;
+}
+
+using Fn_ActorVoid = void (*)(AActor*);
+static Fn_ActorVoid o_ESPawnDestroyed = nullptr;
+static void H_ESPawnDestroyed(AActor* a) {
+    // Our copy is going away. If the host told us this one died, this is the moment to show it.
+    if (a && coop::CurrentRole() == coop::Role::Client && !g_dying.empty()) {
+        auto it = g_dying.find(a);
+        if (it != g_dying.end()) {
+            PlayDeathFx(a);
+            ++g_fxAtDestroy;
+            g_dying.erase(it);
+            g_dyingSince.erase(a);
+        }
+    }
+    o_ESPawnDestroyed(a);
+}
+
 static bool ApplyNpcDeath(const std::string& body) {
     if (!g_npcDeathFx) return true;
     unsigned long long guid = 0;
     if (sscanf(body.c_str(), "%llu", &guid) != 1) return true;
-    if (g_pendingDeaths.size() < 64) g_pendingDeaths.push_back(guid);
+    ++g_deathsRx;
+    // Resolving here is a pure lookup -- no ProcessEvent -- so it is safe on the receive path, and this
+    // is the moment the proxy is most certainly still around (the host announces before destroying it).
+    // Nothing is played yet: we only remember that this actor is doomed, and the FX goes off when it
+    // actually dies (H_ESPawnDestroyed). See the note above.
+    AActor* act = ActorFromNetGuid(guid);
+    if (!act) { ++g_deathsNoActorAtRx; return true; }
+    g_dying[act] = guid;
+    g_dyingSince[act] = g_fxNow;
     return true;
 }
 
-// Runs on the game thread, outside the net receive path.
-void ClientDeathFxTick(float) {
-    if (g_pendingDeaths.empty()) return;
-    std::vector<uint64_t> due;
-    due.swap(g_pendingDeaths);
-    for (uint64_t guid : due) {
-        AActor* act = ActorFromNetGuid(guid);
-        if (!act || !IsValidObject((UObject*)act)) continue;
-        // Only ever call a no-parameter function here: ProcessEvent is handed a null parameter block.
-        UFunction* fn = FindFunction((UObject*)act, "SpawnExplosion");
-        if (!fn || UE_FIELD(uint8_t, fn, es2off::UFunction::NumParms) != 0) continue;
-        ProcessEvent((UObject*)act, fn, nullptr);
-        ++g_npcDeathsPlayed;
+// Runs on the game thread, outside the net receive path. Only the safety net lives here now.
+void ClientDeathFxTick(float dt) {
+    g_fxNow += dt;
+    if (g_dying.empty()) return;
+    for (auto it = g_dying.begin(); it != g_dying.end(); ) {
+        AActor* a = it->first;
+        if (!IsValidObject((UObject*)a)) {
+            // Destroyed without our hook seeing it (or already gone): nothing left to play it on.
+            ++g_deathsNoActorAtDrain;
+            g_dyingSince.erase(a);
+            it = g_dying.erase(it);
+            continue;
+        }
+        if (g_fxNow - g_dyingSince[a] >= g_dyingDeadline) {
+            // The host said it died but our copy is still here well past any death sequence. Play it
+            // anyway rather than silently losing the explosion.
+            PlayDeathFx(a);
+            ++g_fxTimeout;
+            g_dyingSince.erase(a);
+            it = g_dying.erase(it);
+            continue;
+        }
+        ++it;
     }
 }
 
@@ -1006,6 +1285,25 @@ bool OnClientOp(const std::string& op, const std::string& body) {
 }
 
 // ---------------------------------------------------------------- tick
+// Every map change (travel, connect, the loadout pawn swap is NOT one) invalidates the UObject*/AActor*
+// keys below. UObject memory is recycled, so a stale entry is not merely dead weight: a new NPC at an
+// old address would inherit `announcedDead` and never get its explosion, or an old aim sample.
+void OnWorldChanged() {
+    g_npcFireState.clear();
+    g_npcAim.clear(); g_npcLock.clear(); g_npcAutoAim.clear();
+    g_npcTargets.clear(); g_npcCache.clear(); g_npcCacheAge = 0;
+    g_npcHpLast.clear(); g_hostNpcCache.clear(); g_hostNpcCacheAge = 0;
+    g_aim.clear(); g_playerAutoAim.clear(); g_playerLock.clear();
+    g_playerTargetGuid.clear(); g_playerTargetSeen.clear();
+    g_dmgQueue.clear(); g_pendingDmg.clear(); g_pendingDeaths.clear();
+    g_dying.clear(); g_dyingSince.clear();
+    g_explosionClass = nullptr; g_explosionSearched = false;   // classes are per-world-load in practice
+    // The bodies themselves are gone with the old world; just forget them (restoring would dereference
+    // freed actors, and the fresh world's proxies get converted again on sight).
+    g_madeKinematic.clear();
+    // (the jitter probe validates its target every tick and stops by itself)
+}
+
 void Tick(float dt, bool isHost) {
     if (!isHost) return;
     HostNpcAimTick(dt);
@@ -1285,6 +1583,21 @@ static void CmdCombat(const console::Args& a, std::string& out) {
     if (a.size() > 2 && a[1] == "route") g_routeFire = a[2] == "1";
     if (a.size() > 2 && a[1] == "localfire") g_localFire = a[2] == "1";
     if (a.size() > 2 && a[1] == "deathfx") { g_npcDeathFx = a[2] == "1"; out += Format("npc death fx %d\n", (int)g_npcDeathFx); return; }
+    if (a.size() > 2 && a[1] == "fxfallback") { g_fxFallbackOn = a[2] == "1"; out += Format("explosion fallback %d\n", (int)g_fxFallbackOn); return; }
+    // fxtest <guid>: play the death FX on that actor right now, so both paths (a ship's own
+    // SpawnExplosion and the spawned-actor fallback) can be exercised without waiting for a kill.
+    if (a.size() > 2 && a[1] == "fxtest") {
+        AActor* t = ActorFromNetGuid(strtoull(a[2].c_str(), nullptr, 10));
+        if (!t) { out += "guid not resolved here\n"; return; }
+        uint64_t p0 = g_npcDeathsPlayed, f0 = g_fxFallback, n0 = g_fxNoFunction, e0 = g_fxFallbackFailed;
+        PlayDeathFx(t);
+        out += Format("%s: played=%llu fallbackSpawned=%llu noFn=%llu failed=%llu (explosionClass=%s)\n",
+                      GetName((UObject*)t).c_str(),
+                      (unsigned long long)(g_npcDeathsPlayed - p0), (unsigned long long)(g_fxFallback - f0),
+                      (unsigned long long)(g_fxNoFunction - n0), (unsigned long long)(g_fxFallbackFailed - e0),
+                      ExplosionClass() ? GetName((UObject*)ExplosionClass()).c_str() : "none");
+        return;
+    }
     // Diagnostic only: the block is normally driven purely by role. Lifting it lets a client run ES2's
     // real damage path, which is how the impact/hitmarker/destruction visuals are produced -- and also
     // how it reaches the null AESGameModeBase. Useful for measuring exactly where that path dies.
@@ -1293,14 +1606,25 @@ static void CmdCombat(const console::Args& a, std::string& out) {
     if (a.size() > 2 && a[1] == "damageblock") { SetClientDamageBlock(a[2] == "1"); out += Format("client damage block %s\n", a[2].c_str()); return; }
     if (a.size() > 2 && a[1] == "npchp") { g_npcHpSync = a[2] == "1"; out += Format("npc hp sync %d\n", (int)g_npcHpSync); return; }
     if (a.size() > 2 && a[1] == "npcfollow") { g_npcFollow = a[2] == "1"; out += Format("npc follow %d\n", (int)g_npcFollow); return; }
-    if (a.size() > 2 && a[1] == "followrate") { g_npcFollowRate = (float)atof(a[2].c_str()); out += Format("rate %.1f\n", g_npcFollowRate); return; }
+    if (a.size() > 2 && a[1] == "followrate") { g_npcFollowRate = (float)atof(a[2].c_str()); if (!(g_npcFollowRate >= 0.f)) g_npcFollowRate = 0.f; out += Format("rate %.1f\n", g_npcFollowRate); return; }
+    if (a.size() > 2 && a[1] == "kinematic") {
+        bool on = a[2] == "1";
+        if (!on && g_npcKinematic) RestoreSimulation();     // put the bodies back before we stop driving them
+        g_npcKinematic = on;
+        out += Format("npc proxies kinematic %d (restored %llu)\n", (int)g_npcKinematic, (unsigned long long)g_kinematicRestored);
+        return;
+    }
+    if (a.size() > 2 && a[1] == "lead") { g_npcLeadFrame = a[2] == "1"; out += Format("npc one-frame lead %d\n", (int)g_npcLeadFrame); return; }
+    if (a.size() > 2 && a[1] == "npcvel") { g_npcFollowVel = a[2] == "1"; out += Format("npc velocity follow %d\n", (int)g_npcFollowVel); return; }
+    if (a.size() > 2 && a[1] == "npcrot") { g_npcFollowRot = a[2] == "1"; out += Format("npc rotation follow %d\n", (int)g_npcFollowRot); return; }
+    if (a.size() > 2 && a[1] == "rotrate") { g_npcRotRate = (float)atof(a[2].c_str()); if (!(g_npcRotRate >= 0.f)) g_npcRotRate = 0.f; out += Format("rot rate %.1f\n", g_npcRotRate); return; }
     if (a.size() > 2 && a[1] == "clientregen") { g_blockClientRegen = a[2] == "0"; out += Format("client regen blocked %d\n", (int)g_blockClientRegen); return; }
     if (a.size() > 2 && a[1] == "aimattarget") { g_aimAtTarget = a[2] == "1"; out += Format("aim-at-target %d\n", (int)g_aimAtTarget); return; }
     if (a.size() > 2 && a[1] == "autoaim") { g_autoAimSync = a[2] == "1"; out += Format("autoaim sync %d\n", (int)g_autoAimSync); return; }
     if (a.size() > 2 && a[1] == "locksync") { g_lockSync = a[2] == "1"; out += Format("lock sync %d\n", (int)g_lockSync); return; }
     if (a.size() > 2 && a[1] == "npcaim") { g_npcAimSync = a[2] == "1"; out += Format("npc aim sync %d\n", (int)g_npcAimSync); return; }
     if (a.size() > 2 && a[1] == "aimsync") { g_aimSync = a[2] == "1"; out += Format("aim sync %d\n", (int)g_aimSync); return; }
-    if (a.size() > 2 && a[1] == "hphz") g_healthHz = (float)atof(a[2].c_str());
+    if (a.size() > 2 && a[1] == "hphz") { g_healthHz = (float)atof(a[2].c_str()); if (!(g_healthHz >= 1.f)) g_healthHz = 1.f; }   // 0 meant "never" (1/0 = inf)
     if (a.size() > 2 && a[1] == "npcfire") g_mirrorNpcFire = a[2] == "1";
     out += Format("npcFireMirror=%d sent=%llu applied=%llu unresolved=%llu deduped=%llu\n", (int)g_mirrorNpcFire,
                   (unsigned long long)g_npcFireSent, (unsigned long long)g_npcFireApplied,
@@ -1312,6 +1636,15 @@ static void CmdCombat(const console::Args& a, std::string& out) {
                   (int)g_npcAimSync, (unsigned long long)g_npcAimSent, (unsigned long long)g_npcAimApplied, (int)g_npcAim.size());
     out += Format("dmgNumbers=%d dmgSent=%llu dmgShown=%llu dmgMerged=%llu\n", (int)g_dmgNumbers,
                   (unsigned long long)g_dmgSent, (unsigned long long)g_dmgShown, (unsigned long long)g_dmgMerged);
+    // deathsRx < deathsSent is not a fault: the host also kills NPCs the client never had replicated
+    // to it. What must hold is deathsRx == deathsPlayed + the two loss counters.
+    out += Format("deathsRx=%llu deathsNoActorAtRx=%llu deathsNoActorAtDrain=%llu\n",
+                  (unsigned long long)g_deathsRx,
+                  (unsigned long long)g_deathsNoActorAtRx, (unsigned long long)g_deathsNoActorAtDrain);
+    out += Format("fxAtDestroy=%llu fxTimeout=%llu pendingDying=%d | noSpawnExplosionFn=%llu fallbackSpawned=%llu fallbackFailed=%llu\n",
+                  (unsigned long long)g_fxAtDestroy, (unsigned long long)g_fxTimeout, (int)g_dying.size(),
+                  (unsigned long long)g_fxNoFunction, (unsigned long long)g_fxFallback,
+                  (unsigned long long)g_fxFallbackFailed);
     out += Format("npcDeathFx=%d deathsSent=%llu deathsPlayed=%llu\n", (int)g_npcDeathFx,
                   (unsigned long long)g_npcDeathsSent, (unsigned long long)g_npcDeathsPlayed);
     out += Format("npcHpSync=%d npcHpSent=%llu npcHpApplied=%llu\n", (int)g_npcHpSync,
@@ -1319,6 +1652,13 @@ static void CmdCombat(const console::Args& a, std::string& out) {
     out += Format("npcFollow=%d rate=%.1f followed=%llu snaps=%llu tracked=%d\n", (int)g_npcFollow,
                   g_npcFollowRate, (unsigned long long)g_npcFollowed, (unsigned long long)g_npcFollowSnaps,
                   (int)g_npcCache.size());
+    out += Format("npcFollowVel=%d velWrites=%llu | npcFollowRot=%d rotRate=%.1f rotWrites=%llu\n",
+                  (int)g_npcFollowVel, (unsigned long long)g_npcVelWrites,
+                  (int)g_npcFollowRot, g_npcRotRate, (unsigned long long)g_npcRotWrites);
+    out += Format("npcLeadFrame=%d\n", (int)g_npcLeadFrame);
+    out += Format("npcKinematic=%d madeKinematic=%llu restored=%llu tracked=%d\n", (int)g_npcKinematic,
+                  (unsigned long long)g_kinematicSet, (unsigned long long)g_kinematicRestored,
+                  (int)g_madeKinematic.size());
     out += Format("blockClientRegen=%d regenBlocked=%llu\n", (int)g_blockClientRegen, (unsigned long long)g_regenBlocked);
     out += Format("aimAtTarget=%d retargeted=%llu\n", (int)g_aimAtTarget, (unsigned long long)g_aimRetargeted);
     out += Format("aimSync=%d aimSent=%llu aimApplied=%llu aimKnown=%d\n",
@@ -1436,11 +1776,14 @@ void OnInit() {
     { void* orig = nullptr;
       hooks::Install("UGameplayLib::DamageDealtByPlayerOrPlayerFriend", es2rva::UGameplayLib_DamageDealtByPlayerOrPlayerFriend,
                      (void*)&H_DamageDealt, (void**)&o_DamageDealt);
+      hooks::Install("FOnHealthDepletedDelegate::Broadcast", es2rva::FOnHealthDepletedDelegate_Broadcast,
+                     (void*)&H_HealthDepleted, (void**)&o_HealthDepleted);
       hooks::Install("UGameplayLib::ApplyESPointDamage", es2rva::UGameplayLib_ApplyESPointDamage, (void*)&H_ApplyESPointDamage, &orig);
       hooks::Enable("UGameplayLib::ApplyESPointDamage", false); }
     { void* orig = nullptr;
       hooks::Install("UGameplayLib::ApplyESRadialDamage", es2rva::UGameplayLib_ApplyESRadialDamage, (void*)&H_ApplyESRadialDamage, &orig);
       hooks::Enable("UGameplayLib::ApplyESRadialDamage", false); }
+    hooks::Install("AESPawn::Destroyed", es2rva::AESPawn_Destroyed, (void*)&H_ESPawnDestroyed, (void**)&o_ESPawnDestroyed);
     hooks::Install("UShieldComponent::TickRegeneration", es2rva::UShieldComponent_TickRegeneration, (void*)&H_TickRegeneration, (void**)&o_TickRegen);
     hooks::Install("UWeaponComponent::TickComponent", es2rva::UWeaponComponent_TickComponent, (void*)&H_WeaponTick, (void**)&o_WeaponTick);
     hooks::Install("UWeaponComponent::StartFire", es2rva::UWeaponComponent_StartFire, (void*)&H_StartFire, (void**)&o_StartFire);

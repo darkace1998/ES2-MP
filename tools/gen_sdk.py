@@ -88,6 +88,10 @@ RVAS = {
     'UPrimitiveComponent_SetPhysicsAngularVelocityInDegrees': 'public: void __cdecl UPrimitiveComponent::SetPhysicsAngularVelocityInDegrees(struct UE::Math::TVector<double>, bool, class FName)',
     'UPrimitiveComponent_GetPhysicsLinearVelocity': 'public: struct UE::Math::TVector<double> __cdecl UPrimitiveComponent::GetPhysicsLinearVelocity(class FName)',
     'UPrimitiveComponent_IsSimulatingPhysics': 'public: virtual bool __cdecl UPrimitiveComponent::IsSimulatingPhysics(class FName) const',
+    'UPrimitiveComponent_SetSimulatePhysics': 'public: virtual void __cdecl UPrimitiveComponent::SetSimulatePhysics(bool)',
+    'AESPawn_Destroyed': 'protected: virtual void __cdecl AESPawn::Destroyed(void)',
+    'UGameplayStatics_BeginDeferredActorSpawnFromClass': 'public: static class AActor * __cdecl UGameplayStatics::BeginDeferredActorSpawnFromClass(class UObject const *, class TSubclassOf<class AActor>, struct UE::Math::TTransform<double> const &, enum ESpawnActorCollisionHandlingMethod, class AActor *, enum ESpawnActorScaleMethod)',
+    'UGameplayStatics_FinishSpawningActor': 'public: static class AActor * __cdecl UGameplayStatics::FinishSpawningActor(class AActor *, struct UE::Math::TTransform<double> const &, enum ESpawnActorScaleMethod)',
     'AActor_GetVelocity': 'public: virtual struct UE::Math::TVector<double> __cdecl AActor::GetVelocity(void) const',
     'AActor_TeleportTo': 'public: virtual bool __cdecl AActor::TeleportTo(struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, bool, bool)',
     'UEngine_GetGameUserSettings': 'public: class UGameUserSettings * __cdecl UEngine::GetGameUserSettings(void)',
@@ -109,6 +113,10 @@ RVAS = {
     'FText_FromString': 'public: static class FText __cdecl FText::FromString(class FString const &)',
     'UGameplayLib_ApplyESRadialDamage': 'public: static bool __cdecl UGameplayLib::ApplyESRadialDamage(class UObject const *, struct FDamageInfo, struct UE::Math::TVector<double> const &, float, class TArray<class AActor *, class TSizedDefaultAllocator<32>> const &, bool &, struct FWeaponData, class TArray<class AActor *, class TSizedDefaultAllocator<32>> &, class TArray<class AActor *, class TSizedDefaultAllocator<32>> &, class TArray<struct FHitResult, class TSizedDefaultAllocator<32>> &, float, float, class AActor *, class AController *, bool, bool, bool, bool)',
     'UGameplayLib_DamageDealtByPlayerOrPlayerFriend': 'public: static void __cdecl UGameplayLib::DamageDealtByPlayerOrPlayerFriend(class UHitpointComponent const *, float, class AController *, class AActor *, class AActor *, struct FHitResult const &, bool, bool)',
+    'UCutsceneSubSystem_LoadCutscene': 'public: void __cdecl UCutsceneSubSystem::LoadCutscene(class FName, class TMap<class FName, class AActor *, class FDefaultSetAllocator, struct TDefaultMapHashableKeyFuncs<class FName, class AActor *, 0>>, class UObject *, class FCutsceneReadyDelegate const &, class FCutsceneFinishedDelegate const &)',
+    'UCutsceneSubSystem_NotifyPlayCutscene': 'public: void __cdecl UCutsceneSubSystem::NotifyPlayCutscene(class FName, class TMap<class FName, class AActor *, class FDefaultSetAllocator, struct TDefaultMapHashableKeyFuncs<class FName, class AActor *, 0>>)',
+    'UCutsceneSubSystem_NotifyCutsceneFinished': 'public: void __cdecl UCutsceneSubSystem::NotifyCutsceneFinished(class FName)',
+    'FOnHealthDepletedDelegate_Broadcast': 'public: void __cdecl FOnHealthDepletedDelegate::Broadcast(class AActor *, class AActor *, class AController *, float) const',
     'UGameplayLib_ApplyESPointDamage': 'public: static struct FDamageInfo __cdecl UGameplayLib::ApplyESPointDamage(class AActor *, struct FDamageInfo, struct UE::Math::TVector<double> const &, struct FHitResult const &, class AController *, class AActor *, bool &, struct FWeaponData, float, float, bool)',
     'FNetGUIDCache_GetNetGUID': 'public: class FNetworkGUID __cdecl FNetGUIDCache::GetNetGUID(class UObject const *) const',
     'UPackageMapClient_GetNetGUIDFromObject': 'regex:^public: virtual class FNetworkGUID __cdecl UPackageMapClient::GetNetGUIDFromObject\\(class UObject const \\*\\) const$',
@@ -268,6 +276,8 @@ OFFSETS = {
     'FPickupEntry': ['PickupClassPath', 'PickupInventory'],
     'FWeaponInfo': ['WeaponItem', 'WeaponClass', 'SpawnedWeapons'],
     'UActorComponent': ['OwnerPrivate'],
+    'UPrimitiveComponent': ['BodyInstance'],
+    'FBodyInstance': [],
     'UWeaponComponent': ['WeaponSlots', 'WeaponSockets', 'WeaponCategory', 'EquippedSlotIndex',
                          'FocusLocation', 'ClampedNonAutoAimedFocusLocation', 'CurrentAutoAimTarget', 'LockedTarget',
                          'RemainingMissileLockTime',
@@ -286,6 +296,7 @@ BITFIELDS = {  # class -> bitfield members  (adds <m>_off and <m>_mask)
     'AActor': ['bActorIsBeingDestroyed', 'bActorInitialized', 'bReplicates', 'bReplicateMovement', 'bNetStartup', 'bOnlyRelevantToOwner', 'bAlwaysRelevant', 'bNetLoadOnClient', 'bNetUseOwnerRelevancy', 'bHidden', 'bTearOff', 'bExchangedRoles', 'bHasFinishedSpawning', 'bActorEnableCollision', 'bCanBeDamaged', 'bReplicateUsingRegisteredSubObjectList'],
     'APawn': ['bUseControllerRotationPitch', 'bCanAffectNavigationGeneration'],
     'UNetDriver': [],
+    'FBodyInstance': ['bSimulatePhysics'],
 }
 
 def load_symbols(path):

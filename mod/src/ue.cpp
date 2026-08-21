@@ -43,6 +43,7 @@ FName FName::Make(const wchar_t* s) {
     Rva<std::remove_pointer_t<Fn_FName_Ctor>>(es2rva::FName_Ctor_Wide)(&n, s, 1 /*FNAME_Add*/);
     return n;
 }
+FName FName::Make(const std::string& utf8) { return Make(es2coop::Utf8ToWide(utf8).c_str()); }
 
 FString::FString(const std::string& utf8) { Set(es2coop::Utf8ToWide(utf8).c_str()); }
 void FString::Set(const wchar_t* s) {
@@ -91,12 +92,22 @@ static bool SafeRead(const void* p, void* out, size_t n) {
     SIZE_T got = 0;
     return p && ReadProcessMemory(GetCurrentProcess(), p, out, n, &got) && got == n;
 }
+// "The pointer is a live, dereferenceable UObject" — deliberately NOT "not pending-kill". A destroyed
+// object stays in GUObjectArray (and in memory) until the next GC purge, and several callers rely on
+// being able to read a just-retired object's fields (e.g. loadout's RebindStaleChildWidgets detects a
+// stale child by reading a RETIRED pawn's component). Rejecting garbage here would break those. Use
+// IsGarbage() explicitly where "not pending-kill" is the question.
 bool IsValidObject(const UObject* o) {
     if (!o || (reinterpret_cast<uintptr_t>(o) & 7)) return false;
     int32_t idx = 0;
     if (!SafeRead(reinterpret_cast<const char*>(o) + es2off::UObjectBase::InternalIndex, &idx, sizeof idx)) return false;
     if (idx < 0 || idx >= NumObjects()) return false;
     return ObjectAt(idx) == o;
+}
+bool IsGarbage(const UObject* o) {
+    if (!IsValidObject(o)) return true;
+    constexpr int32_t kGarbage = 0x200000, kUnreachable = 0x10000000;   // EInternalObjectFlags (this build)
+    return (ObjectItemFlags(GetInternalIndex(o)) & (kGarbage | kUnreachable)) != 0;
 }
 
 // ---------------------------------------------------------------- names/paths
@@ -130,6 +141,7 @@ static UClass* ResolveClassClass() {
     });
     return g_classClass;
 }
+UClass* ClassClass() { return ResolveClassClass(); }
 
 UClass* FindClass(const std::string& nameIn) {
     std::string name = nameIn;
@@ -140,7 +152,10 @@ UClass* FindClass(const std::string& nameIn) {
     }
     UClass* found = nullptr;
     if (name.rfind("/", 0) == 0) {
-        found = (UClass*)FindObject(name, nullptr);
+        // Filter on the class-of-classes: an unfiltered StaticFindObject happily returns a UPackage
+        // ("/Script/ES2") or any other object at that path, which then gets walked as a UClass.
+        // Non-exact match, so Blueprint-generated classes still resolve.
+        found = (UClass*)FindObject(name, ResolveClassClass());
     } else {
         // accept "AESPawn"/"UShipMovementComponent" style: strip the prefix letter only if it matches A/U + Uppercase
         std::string shortName = name;

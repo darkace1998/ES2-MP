@@ -11,9 +11,10 @@
 // of it (StaticRestoreState of the saved component state, weapon spawning, colours, decals) all use
 // the client's own data — no post-hoc patching.
 //
-// ABI note (verified by disassembly): MSVC x64 returns large structs through a hidden pointer that is
-// the FIRST argument; for member functions the order is (sret, this, ...). GetCurrentShip is static,
-// so it is simply (sret).
+// ABI note (verified by disassembly): MSVC x64 returns large structs through a hidden pointer. For a
+// static/free function it is the first argument, (sret, ...); for a MEMBER function `this` stays in RCX
+// and the sret pointer follows it, (this, sret, ...) — see FShipData::GetShipDataState below.
+// GetCurrentShip is static, so it is simply (sret).
 #include "loadout.h"
 #include "coop.h"
 #include "players.h"
@@ -52,8 +53,9 @@ using Fn_WeaponInfoCtor   = void* (*)(void* weaponInfo);
 static Fn_GetCurrentShip o_GetCurrentShip = nullptr;
 
 // FShipData is 976 bytes, FShipDataState is 1592 — both taken from the PDB.
-static constexpr size_t kShipDataSize = 976;
+static constexpr size_t kShipDataSize = es2off::FShipData::__size;
 static constexpr size_t kShipDataStateSize = 1592;
+static_assert(kShipDataSize == 976, "FShipData size changed — re-check every raw-buffer use in this file");
 
 static UObject* ShipDataStateStruct() { return Rva<std::remove_pointer_t<Fn_StaticStruct>>(es2rva::FShipDataState_StaticStruct)(); }
 static void InitStruct(UObject* ss, void* p) { Rva<std::remove_pointer_t<Fn_InitializeStruct>>(es2rva::UScriptStruct_InitializeStruct)(ss, p, 1); }
@@ -73,7 +75,8 @@ static bool g_inMaterialise = false;
 // that becomes AESPawn::ShipData. The same function (and unrelated HUD/inventory code) calls
 // GetCurrentShip hundreds of times per spawn; substituting them all rebuilds an entire inventory each
 // time and exhausts the UObject array. Filter on the return address, and cap it.
-static constexpr uint32_t kSpawnFnLo = 0x5DEC54C, kSpawnFnHi = 0x5DEF078;
+static constexpr uint32_t kSpawnFnLo = es2rva::AESGameModeBase_SpawnDefaultPawnAtTransform_Implementation, kSpawnFnHi = 0x5DEF078;   // [start, end) of that function
+static_assert(kSpawnFnLo == 0x5DEC54C, "SpawnDefaultPawnAtTransform moved — re-derive kSpawnFnHi (the function's end) from the PDB");
 static constexpr uint64_t kMaxSubstitutions = 4;
 
 // client-side send state (the blob is far larger than one reliable RPC, so it is chunked)
@@ -328,7 +331,7 @@ bool ApplyOwnShipLocally(AActor* pawn, std::string& err) {
 // The vanilla "build my ship from ShipData" path is authority-gated, so on a client nothing fills
 // UWeaponComponent::WeaponSlots. Do it explicitly from the ship's own inventory: each slot's FWeaponInfo
 // is built from the corresponding UItem, then the component spawns the weapon actors.
-static constexpr size_t kWeaponInfoSize = 80;    // sizeof(FWeaponInfo), from the PDB
+static constexpr size_t kWeaponInfoSize = es2off::FWeaponInfo::__size;    // sizeof(FWeaponInfo), from the PDB
 struct RawPtrArray { UObject** Data; int32_t Num; int32_t Max; };
 
 int BuildWeaponsLocally(AActor* pawn, std::string& log) {
@@ -786,7 +789,7 @@ static void CmdShipData(const console::Args& a, std::string& out) {
             out += Format("  %s: %d slot(s), equipped=%d\n", slot, slots.Num,
                           UE_FIELD(int32_t, wc, es2off::UWeaponComponent::EquippedSlotIndex));
             for (int i = 0; i < slots.Num && i < 8; ++i) {
-                char* wi = slots.Data + (size_t)i * 80;   // sizeof(FWeaponInfo)
+                char* wi = slots.Data + (size_t)i * es2off::FWeaponInfo::__size;
                 UObject* item = UE_FIELD(UObject*, wi, es2off::FWeaponInfo::WeaponItem);
                 if (item && IsValidObject(item))
                     out += Format("    [%d] %-22s level=%d rarity=%d seed=%d\n", i,
@@ -809,12 +812,12 @@ static void CmdShipData(const console::Args& a, std::string& out) {
         out += Format("pawn %s\n", GetName((UObject*)pawn).c_str());
 
         struct RawArray { char* Data; int32_t Num; int32_t Max; };
-        auto listSlots = [&](const char* label, UObject* comp, uint32_t arrOff, uint32_t itemOff) {
+        auto listSlots = [&](const char* label, UObject* comp, uint32_t arrOff, uint32_t itemOff, uint32_t stride) {
             if (!comp) { out += Format("  %s: (no component)\n", label); return; }
             RawArray& slots = UE_FIELD(RawArray, comp, arrOff);
             out += Format("  %s: %d slot(s)\n", label, slots.Num);
             for (int i = 0; i < slots.Num && i < 8; ++i) {
-                UObject* item = UE_FIELD(UObject*, slots.Data + (size_t)i * 24, itemOff);   // sizeof(FDeviceInfo)==sizeof(FConsumableInfo)==24
+                UObject* item = UE_FIELD(UObject*, slots.Data + (size_t)i * stride, itemOff);
                 if (item && IsValidObject(item))
                     out += Format("    [%d] %-22s level=%d rarity=%d\n", i,
                                   UE_FIELD(FName, item, es2off::UItem::ItemTemplateID).ToString().c_str(),
@@ -836,8 +839,8 @@ static void CmdShipData(const console::Args& a, std::string& out) {
             if (!dev && cn.find("DeviceComponent") != std::string::npos) dev = v;
             if (!con && cn.find("ConsumableComponent") != std::string::npos) con = v;
         }
-        listSlots("Devices", dev, es2off::UDeviceComponent::DeviceSlots, es2off::FDeviceInfo::DeviceItem);
-        listSlots("Consumables", con, es2off::UConsumableComponent::ConsumableSlots, es2off::FConsumableInfo::ConsumableItem);
+        listSlots("Devices", dev, es2off::UDeviceComponent::DeviceSlots, es2off::FDeviceInfo::DeviceItem, es2off::FDeviceInfo::__size);
+        listSlots("Consumables", con, es2off::UConsumableComponent::ConsumableSlots, es2off::FConsumableInfo::ConsumableItem, es2off::FConsumableInfo::__size);
 
         // and the ship item itself, which is what the equipment UI hangs everything off
         void* sd = reinterpret_cast<char*>(pawn) + es2off::AESPawn::ShipData;
@@ -896,5 +899,13 @@ void MaybeSendOnJoin() {
 void ResetSession() {
     g_sentThisSession = false; g_pendingSend.clear(); g_sendOffset = 0;
     g_stash.clear(); g_recvBuf.clear(); g_respawn.clear(); g_applied.clear();
+}
+// The two "done for this pawn" latches compare raw pointers. After a map change the allocator can hand
+// the new pawn the old address, and the HUD (which lives under the GameInstance and survives the
+// travel) would then never be rebound, nor the weapons rebuilt.
+void OnWorldChanged() {
+    g_builtFor = nullptr;
+    g_lastHudPawn = nullptr;
+    g_reticleNext = 0;
 }
 }

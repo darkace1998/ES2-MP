@@ -11,6 +11,7 @@
 // with one Steam account, right up to the point where a second player is genuinely required.
 #include "steamp2p.h"
 #include "coop.h"
+#include "travel.h"
 #include "console.h"
 #include "log.h"
 #include "hooks.h"
@@ -70,19 +71,17 @@ bool OpenInviteOverlay(const std::string& connectString) {
 void SetConnectPresence(const std::string& connectString) {
     void* f = FriendsIface();
     if (!f) return;
-    if (connectString.empty()) {
-        auto clear = Sym<void (*)(void*, const char*)>("SteamAPI_ISteamFriends_ClearRichPresence");
-        if (clear) clear(f, "connect");
-        return;
-    }
     auto set = Sym<bool (*)(void*, const char*, const char*)>("SteamAPI_ISteamFriends_SetRichPresence");
-    if (set) set(f, "connect", connectString.c_str());
+    if (!set) return;
+    // An empty value removes just this key. (ISteamFriends::ClearRichPresence takes no key argument —
+    // calling it here wiped every rich-presence key the game had set, not only "connect".)
+    set(f, "connect", connectString.c_str());
 }
 std::string ConnectString() {
-    uint64_t id = LocalSteamIdViaOSS();
+    uint64_t id = LocalSteamId();      // flat API first: the OSS path hands back a TSharedPtr we never release
     if (!id) return {};
     char buf[64];
-    snprintf(buf, sizeof buf, "steam.%llu:7777", (unsigned long long)id);
+    snprintf(buf, sizeof buf, "steam.%llu:%d", (unsigned long long)id, travel::ListenPort());
     return buf;
 }
 
@@ -122,7 +121,9 @@ static int H_GetNumSessions(void* self) {
 }
 
 // This machine's own SteamID64 via the online subsystem. Only valid once the Steam OSS has come
-// up, which is later than the main menu — LocalSteamIdViaOSS() prefers steam_api64 and falls back to this.
+// up, which is later than the main menu — LocalSteamId() prefers steam_api64 and falls back to this.
+// NOTE: the returned TSharedPtr's reference is never released (no controller-release RVA in the SDK),
+// so this leaks a small FUniqueNetIdSteam per call; keep it on the fallback path, never per tick.
 static uint64_t LocalSteamIdViaOSS() {
     void* ident = IdentityInterface();
     if (!ident) return 0;
@@ -153,9 +154,9 @@ static void CmdSteam(const console::Args& a, std::string& out) {
         out += Format("   identity interface             : %p\n", IdentityInterface());
     }
     out += Format("2. FSocketSubsystemSteam singleton : %s\n", sock ? "registered" : "NULL (CreateSteamSocketSubsystem did not run)");
-    uint64_t id = LocalSteamIdViaOSS();
-    if (id) out += Format("3. this machine's SteamID64        : %llu\n   join address                   : steam.%llu:7777\n",
-                          (unsigned long long)id, (unsigned long long)id);
+    uint64_t id = LocalSteamId();
+    if (id) out += Format("3. this machine's SteamID64        : %llu\n   join address                   : steam.%llu:%d\n",
+                          (unsigned long long)id, (unsigned long long)id, travel::ListenPort());
     else    out += "3. this machine's SteamID64        : (unavailable)\n";
 
     UWorld* w = GetWorld();

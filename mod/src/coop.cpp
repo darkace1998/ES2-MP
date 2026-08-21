@@ -159,10 +159,18 @@ static void SendLocalTransform() {
         t.Rotation.X, t.Rotation.Y, t.Rotation.Z, t.Rotation.W, vel.X, vel.Y, vel.Z));
 }
 
+// T/PT bodies: 10 doubles. %lf happily parses "nan"/"inf", and one such sample fed to SetActorTransform
+// + SetPhysicsLinearVelocity poisons the pawn's physics state for good, so reject non-finite values.
+static bool ParseTransform10(const char* s, double* v) {
+    if (sscanf(s, "%lf|%lf|%lf|%lf|%lf|%lf|%lf|%lf|%lf|%lf",
+               &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9]) != 10) return false;
+    for (int i = 0; i < 10; ++i) if (!std::isfinite(v[i])) return false;
+    return true;
+}
+
 static bool RecvTransform(APlayerController* pc, const std::string& body) {
     double v[10];
-    if (sscanf(body.c_str(), "%lf|%lf|%lf|%lf|%lf|%lf|%lf|%lf|%lf|%lf",
-               &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9]) != 10) return false;
+    if (!ParseTransform10(body.c_str(), v)) return false;
     players::Player* pl = players::ByController(pc);
     if (!pl) pl = players::RegisterController(pc);
     if (!pl) return true;
@@ -243,7 +251,12 @@ bool OnServerMessage(APlayerController* fromPC, const std::string& raw) {
         players::Player* pl = players::ByController(fromPC);
         if (!pl) pl = players::RegisterController(fromPC);
         if (pl) {
-            if (!body.empty()) pl->name = body;
+            if (!body.empty()) {
+                pl->name = body;
+                // The name travels inside ROSTER as "id=name|id=name": a Steam persona containing the
+                // separators would corrupt every entry after it.
+                for (char& c : pl->name) if (c == '|' || c == '=') c = '/';
+            }
             LOGF("[coop] HELLO from %s -> id %d", pl->name.c_str(), pl->id);
             SendToClient(fromPC, Format("WELCOME|%d|%d", pl->id, players::Count()));
             BroadcastRoster();
@@ -281,8 +294,7 @@ bool OnClientMessage(APlayerController* toPC, const std::string& raw) {
         if (b2 != std::string::npos && id != players::LocalId()) {
             players::Player* p = players::ById(id);
             double v[10];
-            if (p && p->pawn && sscanf(body.c_str() + b2 + 1, "%lf|%lf|%lf|%lf|%lf|%lf|%lf|%lf|%lf|%lf",
-                                       &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9]) == 10) {
+            if (p && p->pawn && ParseTransform10(body.c_str() + b2 + 1, v)) {
                 p->tgtLoc = FVector{v[0], v[1], v[2]}; p->tgtRot = FQuat{v[3], v[4], v[5], v[6]};
                 p->tgtVel = FVector{v[7], v[8], v[9]}; p->tgtTime = g_now; p->hasTarget = true;
             }
@@ -369,6 +381,8 @@ static void Tick(float dt) {
         // A map load invalidates every actor pointer we hold (and single-player loads fire PostLogin too).
         g_lastWorld = w;
         players::Reset();
+        combat::OnWorldChanged();     // pointer-keyed caches (NPC state, HUD/pawn latches) must not survive a map
+        loadout::OnWorldChanged();
         g_helloSent = false; g_welcomed = false; g_helloAccum = 0;
         if (r == Role::Host) {
             players::SetLocalId(0);
@@ -417,7 +431,7 @@ static void Tick(float dt) {
 
 // ---------------------------------------------------------------- commands
 static void CmdCoop(const console::Args& a, std::string& out) {
-    if (a.size() > 2 && a[1] == "hz") g_sendHz = (float)atof(a[2].c_str());
+    if (a.size() > 2 && a[1] == "hz") { g_sendHz = (float)atof(a[2].c_str()); if (!(g_sendHz >= 1.f)) g_sendHz = 1.f; if (g_sendHz > 120.f) g_sendHz = 120.f; }
     else if (a.size() > 2 && a[1] == "verbose") g_verbose = a[2] == "1";
     else if (a.size() > 2 && a[1] == "smooth") g_smoothRate = atof(a[2].c_str());
     else if (a.size() > 2 && a[1] == "rotrate") g_rotRate = atof(a[2].c_str());

@@ -8,7 +8,8 @@ using Args = std::vector<std::string>;
 using Handler = std::function<void(const Args& args, std::string& out)>;
 using TickFn = std::function<void(float dt)>;
 
-void Start(int basePort);                 // TCP server on 127.0.0.1:<first free port in [basePort, basePort+9]>
+// TCP server on 127.0.0.1. scan=true: first free port in [basePort, basePort+9]; scan=false: exactly basePort or nothing.
+void Start(int basePort, bool scan = true);
 int  Port();
 void Register(const std::string& name, const std::string& help, Handler h, bool onGameThread = true);
 void RegisterTick(const std::string& name, TickFn fn);   // called every UGameEngine::Tick on the game thread

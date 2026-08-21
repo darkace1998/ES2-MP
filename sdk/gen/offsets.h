@@ -518,6 +518,14 @@ namespace es2off {
     constexpr uint32_t __size = 160;
     constexpr uint32_t OwnerPrivate = 0x90; // AActor * (size 8) from UActorComponent
   }
+  namespace UPrimitiveComponent {
+    constexpr uint32_t __size = 1264;
+    constexpr uint32_t BodyInstance = 0x348; // FBodyInstance (size 376) from UPrimitiveComponent
+  }
+  namespace FBodyInstance {
+    constexpr uint32_t __size = 376;
+    constexpr uint32_t bSimulatePhysics_off = 0x8; constexpr uint32_t bSimulatePhysics_mask = 0x1; // unsigned char : 1 @bit0 from FBodyInstanceCore
+  }
   namespace UWeaponComponent {
     constexpr uint32_t __size = 2512;
     constexpr uint32_t WeaponSlots = 0x238; // TArray<FWeaponInfo,TSizedDefaultAllocator<32> > (size 16) from UWeaponComponent

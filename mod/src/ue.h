@@ -24,7 +24,7 @@ struct FName {
     bool IsNone() const { return ComparisonIndex == 0 && Number == 0; }
     std::string ToString() const;
     static FName Make(const wchar_t* s);       // FNAME_Add
-    static FName Make(const std::string& s) { std::wstring w(s.begin(), s.end()); return Make(w.c_str()); }
+    static FName Make(const std::string& utf8); // decodes UTF-8 (byte-widening turned every non-ASCII name into garbage)
 };
 
 void* Malloc(size_t n, uint32_t align = 0);
@@ -74,6 +74,9 @@ namespace vt { // vtable slots from the PDB (tools/pdb_types.py vtable <Class>)
     constexpr int UNetConnection_LowLevelGetRemoteAddress = 93;
     constexpr int UNetConnection_LowLevelDescribe = 94;
     constexpr int UNetConnection_Describe = 95;
+    // ES2 OVERRIDES this one (UMovementRootComponent::SetSimulatePhysics), which is the class every ship's
+    // CollisionRoot0 actually is — calling the UPrimitiveComponent RVA directly would run the wrong body.
+    constexpr int UPrimitiveComponent_SetSimulatePhysics = 213;
 }
 
 // ---------------------------------------------------------------- UObject family (opaque; accessed via offsets)
@@ -94,7 +97,9 @@ std::string GetFullName(const UObject* o);          // "ClassName /Path/To.Objec
 std::string GetObjectClassName(const UObject* o);
 bool IsChildOf(const UStruct* s, const UStruct* base);
 bool IsA(const UObject* o, const UClass* cls);
-bool IsValidObject(const UObject* o);              // pointer is in GUObjectArray and not garbage
+bool IsValidObject(const UObject* o);              // pointer is a live, dereferenceable UObject (may be pending-kill)
+bool IsGarbage(const UObject* o);                  // true if not valid, or MarkAsGarbage'd / unreachable (pending GC)
+UClass* ClassClass();                              // UClass::StaticClass() — IsA(o, ClassClass()) is true for every class object, Blueprint-generated ones included
 
 // object array
 int32_t NumObjects();

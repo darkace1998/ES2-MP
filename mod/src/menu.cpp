@@ -72,6 +72,17 @@ static std::string g_slotText[players::kMaxPlayers];
 static void OnSlotClicked(int i);
 static UObject* g_injected = nullptr;
 static UObject* g_injectedBox = nullptr;
+// The class our buttons are instances of. A pointer match in H_ProcessEvent is only trusted for an
+// object of this class: UObject memory is recycled, so a stale slot pointer could otherwise fire on
+// whatever the allocator put at that address next.
+static UClass* g_buttonClass = nullptr;
+
+static void ForgetWidgets() {
+    for (auto& s : g_slots) s = nullptr;
+    g_slotBox = nullptr;
+    g_injected = g_injectedBox = nullptr;
+    g_menu = g_button = g_statusButton = nullptr;
+}
 
 // ---------------------------------------------------------------- helpers
 // FindClass() only matches exact UClass objects, so Blueprint classes (WidgetBlueprintGeneratedClass)
@@ -148,8 +159,10 @@ static void OnMultiplayerClicked() {
 }
 
 static void H_ProcessEvent(UObject* obj, UFunction* fn, void* parms) {
-    // Two pointer compares on a hot path; everything else falls straight through.
-    if (obj && fn && (obj == g_button || obj == g_slots[0] || obj == g_slots[1] || obj == g_slots[2] || obj == g_slots[3])) {
+    // Two pointer compares on a hot path; everything else falls straight through. On a match, confirm
+    // the object really is one of our buttons before acting (the pointer may have been recycled).
+    if (obj && fn && (obj == g_button || obj == g_slots[0] || obj == g_slots[1] || obj == g_slots[2] || obj == g_slots[3])
+        && g_buttonClass && GetClass(obj) == g_buttonClass) {
         const std::string n = GetName((UObject*)fn);
         if (g_trace) LOGF("[menu] trace %s <- %s", obj == g_button ? "entry" : "slot", n.c_str());
         if (n == "OnBtnClicked" && Settled() && !g_selfUpdate) {
@@ -163,12 +176,33 @@ static void H_ProcessEvent(UObject* obj, UFunction* fn, void* parms) {
 // Put our entry directly under NEW GAME. UPanelWidget has no InsertChildAt, so the only way to place
 // a child at an index is to detach everything below the anchor and re-attach it in the wanted order.
 // Re-adding creates fresh UVerticalBoxSlots with default layout, which would visibly change the menu's
-// spacing, so each slot's settings block is copied back over the new one. Parent/Content sit before
-// that block, so copying [Size .. end) never touches the linkage.
+// spacing, so each slot's settings block is copied back over the new one.
+//
+// ONLY the reflected settings [Size .. VerticalAlignment]. The class ends with a private
+// `SVerticalBox::FSlot* Slot` (+0x58, PDB), the slot's live Slate linkage: the snapshots are taken
+// before RemoveChild frees that FSlot, so copying to the end of the object stamped a dangling pointer
+// into every re-added slot (and our own slot aliased the Continue button's). BuildSlot has already
+// pushed the defaults into Slate by the time we run, so the restored values are re-applied through the
+// slot's own setters, which is also the only way they reach the screen.
 static void CopySlotSettings(UObject* dst, const uint8_t* src) {
     if (!dst || !src) return;
     constexpr uint32_t from = es2off::UVerticalBoxSlot::Size;
-    memcpy(reinterpret_cast<uint8_t*>(dst) + from, src + from, es2off::UVerticalBoxSlot::__size - from);
+    constexpr uint32_t to = es2off::UVerticalBoxSlot::VerticalAlignment + 1;
+    static_assert(to + 8 <= es2off::UVerticalBoxSlot::__size, "UVerticalBoxSlot layout changed: settings block must end before the FSlot pointer");
+    memcpy(reinterpret_cast<uint8_t*>(dst) + from, src + from, to - from);
+    auto apply = [&](const char* setter, uint32_t off, size_t n) {
+        UFunction* fn = FindFunction(dst, setter);
+        if (!fn) return;
+        size_t sz = UE_FIELD(uint16_t, fn, es2off::UFunction::ParmsSize);
+        if (sz < n) return;                       // not the signature we expect — leave it alone
+        std::vector<uint8_t> parms(sz + 16, 0);
+        memcpy(parms.data(), src + off, n);
+        ProcessEvent(dst, fn, parms.data());
+    };
+    apply("SetSize", es2off::UVerticalBoxSlot::Size, 8);                         // FSlateChildSize
+    apply("SetPadding", es2off::UVerticalBoxSlot::Padding, 16);                  // FMargin
+    apply("SetHorizontalAlignment", es2off::UVerticalBoxSlot::HorizontalAlignment, 1);
+    apply("SetVerticalAlignment", es2off::UVerticalBoxSlot::VerticalAlignment, 1);
 }
 
 static void InsertAfter(UObject* box, UObject* widget, const char* anchorName) {
@@ -318,6 +352,9 @@ static void UpdateLobbySlots() {
 
 static void OnSlotClicked(int i) {
     if (!coop::RosterName(i).empty()) return;           // an occupied slot is just a readout
+    // An invitee is about to JOIN someone else's session: arming hosting here too made the next map
+    // run `connect` and `listen` back to back, and advertised this machine's own address to friends.
+    if (!g_pendingJoin.empty()) { LOGF("[menu] lobby slot %d clicked while joining %s — invites are the host's job", i + 1, g_pendingJoin.c_str()); return; }
     // Hosting has to be armed for the connect string to mean anything to the friend who accepts.
     if (coop::CurrentRole() == coop::Role::None) g_armHost = true;
     std::string cs = steamp2p::ConnectString();
@@ -346,10 +383,16 @@ static bool BuildButtons() {
     auto removeChild = Rva<std::remove_pointer_t<Fn_RemoveChild>>(es2rva::UPanelWidget_RemoveChild);
 
     // Drop a previous entry first; otherwise a rebuild (or a second pass over the same live menu)
-    // leaves two MULTIPLAYER rows stacked in the box.
+    // leaves two MULTIPLAYER rows stacked in the box. Same for the four lobby slots, which used to be
+    // left behind in the canvas under the fresh ones.
     if (g_injected && IsValidObject(g_injected) && g_injectedBox && IsValidObject(g_injectedBox))
         removeChild(g_injectedBox, g_injected);
     g_injected = g_injectedBox = nullptr;
+    if (g_slotBox && IsValidObject(g_slotBox))
+        for (UObject* s : g_slots) if (s && IsValidObject(s)) removeChild(g_slotBox, s);
+    for (auto& sp : g_slots) sp = nullptr;
+    g_slotBox = nullptr;
+    g_buttonClass = buttonClass;
 
     UObject* btn = create((UObject*)GetWorld(), &buttonClass, pc);
     if (!btn) { LOGF("[menu] CreateWidget failed"); return false; }
@@ -363,7 +406,6 @@ static bool BuildButtons() {
     // the lobby overview hangs off the menu's root canvas, not the button box, so it can be pinned
     UObject* wt = GetObjectProp(menu, "WidgetTree");
     UObject* canvas = wt ? GetObjectProp(wt, "RootWidget") : nullptr;
-    for (auto& sp : g_slots) sp = nullptr;
     if (canvas) BuildLobbySlots(canvas, buttonClass, pc);
     else LOGF("[menu] no root canvas — lobby overview skipped");
     g_lastStatus = LobbyLine();
@@ -391,19 +433,35 @@ void Tick(float dt) {
     if (!g_pendingJoin.empty() && !inMenu && !inTransition && coop::CurrentRole() == coop::Role::None) {
         std::string addr = g_pendingJoin;
         g_pendingJoin.clear();
+        g_armHost = false;            // joining and hosting are exclusive; `connect` only queues the travel, so the role is still None this tick
         LOGF("[menu] map '%s' is up -> joining %s", wn.c_str(), addr.c_str());
         LOGF("[menu] %s", console::Dispatch("connect " + addr, true).c_str());
-    }
-    if (g_armHost && !inMenu && !inTransition && coop::CurrentRole() == coop::Role::None) {
+    } else if (g_armHost && !inMenu && !inTransition && coop::CurrentRole() == coop::Role::None) {
         g_armHost = false;
         LOGF("[menu] map '%s' is up -> starting the listen server", wn.c_str());
         std::string r = console::Dispatch("listen 7777", true);
         LOGF("[menu] %s", r.c_str());
-        steamp2p::SetConnectPresence(steamp2p::ConnectString());
+        std::string cs = steamp2p::ConnectString();
+        steamp2p::SetConnectPresence(cs);
+        // The menu flow listens on whatever `netdriver` selected (IP by default) while the invite
+        // carries a steam.<id> address. Those only meet if the Steam transport was selected before
+        // this listen; say so rather than let an invite fail silently.
+        if (!cs.empty() && GetObjectClassName((UObject*)GetNetDriver(GetWorld())) != "SteamNetDriver")
+            LOGF("[menu] WARNING: advertising %s to Steam friends but hosting on %s — Steam invites cannot connect to an IP listen server (run 'netdriver steam' before the map loads, or have friends 'connect <ip>:7777')",
+                 cs.c_str(), GetObjectClassName((UObject*)GetNetDriver(GetWorld())).c_str());
     }
 
     // Only present in the main menu map; the widget is destroyed with it, so rebuild when it returns.
-    if (!inMenu) { g_menu = g_button = g_statusButton = nullptr; return; }
+    // Once the menu object itself is gone, every widget pointer we hold is dead — forget them all, or
+    // a recycled address could make an unrelated button read as one of our lobby slots.
+    if (!inMenu) {
+        g_menu = g_button = g_statusButton = nullptr;
+        // The slots/entry are kept across a rebuild on purpose; once they are dead objects, drop them.
+        bool dead = (g_injected && !IsValidObject(g_injected));
+        for (UObject* s : g_slots) if (s && !IsValidObject(s)) dead = true;
+        if (dead) ForgetWidgets();
+        return;
+    }
 
     if (!g_button || !IsValidObject(g_button) || !g_menu || !IsValidObject(g_menu)) {
         g_menu = g_button = g_statusButton = nullptr;

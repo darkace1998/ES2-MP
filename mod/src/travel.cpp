@@ -126,6 +126,7 @@ bool OnClientOp(const std::string& op, const std::string& body) {
 
 void SetHostAddress(const std::string& addr) { g_hostAddr = addr; LOGF("[travel] host address remembered: %s", addr.c_str()); }
 void SetListenPort(int port) { g_listenPort = port; }
+int  ListenPort() { return g_listenPort; }
 
 // Driven from the coop tick on both sides.
 void Tick(float dt, bool isHost) {
@@ -202,7 +203,7 @@ static void CmdLocations(const console::Args& a, std::string& out) {
     out += Format("locations: %d\n", locs.Num);
     int shown = 0;
     for (int i = 0; i < locs.Num && shown < 60; ++i) {
-        char* ld = locs.Data + (size_t)i * 448;   // sizeof(FLocationData)
+        char* ld = locs.Data + (size_t)i * es2off::FLocationData::__size;
         std::string id = UE_FIELD(FName, ld, es2off::FLocationData::LocationID).ToString();
         std::string sys = UE_FIELD(FName, ld, es2off::FLocationData::SystemID).ToString();
         if (!filter.empty() && id.find(filter) == std::string::npos && sys.find(filter) == std::string::npos) continue;

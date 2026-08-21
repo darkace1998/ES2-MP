@@ -3,7 +3,9 @@
 Usage: console.py <port|name> <command ...>        one command, prints response
        console.py <port|name> -i                    interactive
        console.py <port|name> -f <file>             run each line of file
-<name> resolves via run/<name>.port written by launch.sh or the ES2Coop/console-<pid>.port files (first match).
+<name> resolves via run/<name>.port written by launch.sh. That file is authoritative: launch.sh pins the
+port through ES2COOP_CONSOLE_PORT and the mod then binds exactly that port or none (it logs and
+disables its console if the port is taken, rather than silently moving to the next one).
 """
 import socket, sys, os, glob, time
 

@@ -21,6 +21,7 @@
 #include <windows.h>
 #include <map>
 #include <string>
+#include <vector>
 #include <cstdlib>
 #include <cstdio>
 
@@ -102,27 +103,36 @@ static void H_UpdateTaskInPlayerData(void* task, bool a, bool b) {
 
 // Client: write the mirrored values into our own UPlayerData record for that task.
 static bool ApplyTask(const std::string& body) {
-    char id[128] = {0}, loc[128] = {0}, station[128] = {0};
-    int state = 0, stage = 0, progress = 0;
     // MT|<taskId>|<state>|<stage>|<progress>|<locationId>|<stationId>
-    if (sscanf(body.c_str(), "%127[^|]|%d|%d|%d|%127[^|]|%127[^|]", id, &state, &stage, &progress, loc, station) < 4)
-        return false;
-    FName taskId = FName::Make(std::string(id));
+    // Split by hand: a `%[^|]` scanset fails on an EMPTY field, and an empty location (common) then
+    // stopped sscanf before the station, which was silently never applied.
+    std::vector<std::string> f;
+    for (size_t pos = 0;;) {
+        size_t bar = body.find('|', pos);
+        f.push_back(body.substr(pos, bar == std::string::npos ? std::string::npos : bar - pos));
+        if (bar == std::string::npos) break;
+        pos = bar + 1;
+    }
+    if (f.size() < 4 || f[0].empty()) return false;
+    const std::string& id = f[0];
+    int state = atoi(f[1].c_str()), stage = atoi(f[2].c_str()), progress = atoi(f[3].c_str());
+    const std::string loc = f.size() > 4 ? f[4] : "", station = f.size() > 5 ? f[5] : "";
+    FName taskId = FName::Make(id);
     void* rec = Rva<std::remove_pointer_t<Fn_FindTaskInPlayerData>>(es2rva::UMissionLib_FindTaskInPlayerData)(taskId);
     if (!rec) {
         // The client has no record for this task. That happens when the two players' saves differ; a full
         // snapshot on join covers the common case, and creating records from scratch would mean
         // constructing FTaskSaveGameData (320 bytes with TArray/TMap members) — deliberately not done here.
         static int warned = 0;
-        if (warned++ < 10) LOGF("[world] no local record for task '%s' (state %d) — skipped", id, state);
+        if (warned++ < 10) LOGF("[world] no local record for task '%s' (state %d) — skipped", id.c_str(), state);
         return true;
     }
     g_applying = true;
     UE_FIELD(uint8_t, rec, es2off::FTaskSaveGameData::TaskState) = (uint8_t)state;
     UE_FIELD(int32_t, rec, es2off::FTaskSaveGameData::Stage) = stage;
     UE_FIELD(int32_t, rec, es2off::FTaskSaveGameData::Progress) = progress;
-    if (loc[0])     UE_FIELD(FName, rec, es2off::FTaskSaveGameData::LocationID) = FName::Make(std::string(loc));
-    if (station[0]) UE_FIELD(FName, rec, es2off::FTaskSaveGameData::StationID) = FName::Make(std::string(station));
+    if (!loc.empty())     UE_FIELD(FName, rec, es2off::FTaskSaveGameData::LocationID) = FName::Make(loc);
+    if (!station.empty()) UE_FIELD(FName, rec, es2off::FTaskSaveGameData::StationID) = FName::Make(station);
     g_applying = false;
     ++g_taskApplied;
     g_indicatorsDirty = true;
@@ -295,9 +305,76 @@ static void CmdMissions(const console::Args& a, std::string& out) {
     }
 }
 
+
+// ---------------------------------------------------------------- cutscenes
+// A cutscene in ES2 is a STREAMED SUB-LEVEL, identified end to end by an FName (`cutsceneLevelName`)
+// whose level script actor derives from ACutsceneLevelScriptActor. UCutsceneSubSystem drives it:
+//   LoadCutscene(name, attachToProxies, params, readyCb, finishedCb)
+//     -> NotifyCutsceneLoaded(name, params) -> NotifyCutsceneReady(scriptActor, name)
+//     -> NotifyPlayCutscene(name, proxies)  -> NotifyCutsceneFinished(name)
+// The subsystem is per-WORLD and a client has its own instance, and every one of those entry points is
+// a reflected UFunction, so a client can be driven through exactly the same sequence.
+//
+// The one genuinely hard part is `attachToProxies`, a TMap<FName, AActor*>: the cutscene binds real
+// actors into the scene by role name. The KEYS are FNames both machines share; the VALUES are pointers
+// that mean nothing on the other machine, so a client has to rebuild the map against its own actors.
+//
+// This is instrumentation FIRST, on purpose. Nothing is forwarded yet: campaign cutscenes are rare and
+// none has been observed live, so guessing at the proxy contents would be inventing a design. These
+// hooks record what a real cutscene actually passes, and `cutscene` prints it.
+static uint64_t g_csLoad = 0, g_csPlay = 0, g_csFinish = 0;
+struct CutsceneSighting { std::string what; std::string name; int proxies = -1; };
+static std::vector<CutsceneSighting> g_csSeen;
+
+// TMap is a TSet of tuples over a sparse array; its element count sits at the same offset a TArray's
+// would (Data, ArrayNum). Read only the count -- enough to know whether proxies are even in play.
+static int MapNum(const void* map) {
+    if (!map) return -1;
+    struct RawArray { void* Data; int32_t Num; int32_t Max; };
+    const RawArray& a = *(const RawArray*)map;
+    return (a.Num >= 0 && a.Num < 4096) ? a.Num : -1;
+}
+
+static void NoteCutscene(const char* what, FName name, const void* proxies) {
+    if (g_csSeen.size() < 64)
+        g_csSeen.push_back({what, name.ToString(), MapNum(proxies)});
+    LOGF("[cutscene] %s name=%s proxies=%d role=%s", what, name.ToString().c_str(), MapNum(proxies),
+         coop::CurrentRole() == coop::Role::Client ? "client" : "host");
+}
+
+using Fn_LoadCutscene   = void (*)(UObject*, FName, void*, UObject*, const void*, const void*);
+using Fn_NotifyPlay     = void (*)(UObject*, FName, void*);
+using Fn_NotifyFinished = void (*)(UObject*, FName);
+static Fn_LoadCutscene   o_LoadCutscene = nullptr;
+static Fn_NotifyPlay     o_NotifyPlay = nullptr;
+static Fn_NotifyFinished o_NotifyFinished = nullptr;
+
+static void H_LoadCutscene(UObject* self, FName name, void* proxies, UObject* params,
+                           const void* readyCb, const void* finishedCb) {
+    ++g_csLoad; NoteCutscene("load", name, proxies);
+    o_LoadCutscene(self, name, proxies, params, readyCb, finishedCb);
+}
+static void H_NotifyPlayCutscene(UObject* self, FName name, void* proxies) {
+    ++g_csPlay; NoteCutscene("play", name, proxies);
+    o_NotifyPlay(self, name, proxies);
+}
+static void H_NotifyCutsceneFinished(UObject* self, FName name) {
+    ++g_csFinish; NoteCutscene("finish", name, nullptr);
+    o_NotifyFinished(self, name);
+}
+
+static void CmdCutscene(const console::Args&, std::string& out) {
+    out += Format("load=%llu play=%llu finish=%llu  (host and client both log; a client seeing 0 while\n"
+                  "the host counts up is exactly the bug we are chasing)\n",
+                  (unsigned long long)g_csLoad, (unsigned long long)g_csPlay, (unsigned long long)g_csFinish);
+    if (g_csSeen.empty()) { out += "no cutscene has been observed on this machine yet\n"; return; }
+    for (auto& c : g_csSeen) out += Format("  %-7s %-40s proxies=%d\n", c.what.c_str(), c.name.c_str(), c.proxies);
+}
+
 void Register() {
     console::Register("world", "world [missions 0/1|dialog 0/1|xp 0/1|refresh] - shared world-state sync status", CmdWorld);
     console::Register("missions", "missions [taskIdFilter] - mission task actors and this machine's PlayerData records", CmdMissions);
+    console::Register("cutscene", "cutscene - cutscenes this machine has seen (name + proxy count)", CmdCutscene);
 }
 
 void OnInit() {
@@ -309,5 +386,11 @@ void OnInit() {
                    (void*)&H_OnMissionCompleted, (void**)&o_OnMissionCompleted);
     hooks::Install("ChangeTrackedMission_Internal", es2rva::ChangeTrackedMission_Internal,
                    (void*)&H_ChangeTrackedMission, (void**)&o_ChangeTrackedMission);
+    hooks::Install("UCutsceneSubSystem::LoadCutscene", es2rva::UCutsceneSubSystem_LoadCutscene,
+                   (void*)&H_LoadCutscene, (void**)&o_LoadCutscene);
+    hooks::Install("UCutsceneSubSystem::NotifyPlayCutscene", es2rva::UCutsceneSubSystem_NotifyPlayCutscene,
+                   (void*)&H_NotifyPlayCutscene, (void**)&o_NotifyPlay);
+    hooks::Install("UCutsceneSubSystem::NotifyCutsceneFinished", es2rva::UCutsceneSubSystem_NotifyCutsceneFinished,
+                   (void*)&H_NotifyCutsceneFinished, (void**)&o_NotifyFinished);
 }
 }

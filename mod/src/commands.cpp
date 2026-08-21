@@ -18,13 +18,16 @@ UObject* ResolveObject(const std::string& spec, std::string& err) {
         if (!IsValidObject(o)) { err = "not a live UObject: " + spec; return nullptr; }
         return o;
     }
-    if (spec == "world") return (UObject*)GetWorld();
-    if (spec == "engine") return (UObject*)GetEngine();
-    if (spec == "gi") return (UObject*)GetGameInstance();
-    if (spec == "pc") return (UObject*)GetFirstLocalPlayerController(GetWorld());
-    if (spec == "gm") return (UObject*)GetGameMode(GetWorld());
-    if (spec == "pawn") { APlayerController* pc = GetFirstLocalPlayerController(GetWorld()); return pc ? UE_FIELD(UObject*, pc, es2off::AController::Pawn) : nullptr; }
-    if (spec == "netdriver") return (UObject*)GetNetDriver(GetWorld());
+    // Aliases: say so when one resolves to nothing (a client has no game mode, a dead player no pawn),
+    // instead of answering with an empty line that the harness cannot tell from success.
+    auto alias = [&](UObject* o) { if (!o) err = "'" + spec + "' is null right now"; return o; };
+    if (spec == "world") return alias((UObject*)GetWorld());
+    if (spec == "engine") return alias((UObject*)GetEngine());
+    if (spec == "gi") return alias((UObject*)GetGameInstance());
+    if (spec == "pc") return alias((UObject*)GetFirstLocalPlayerController(GetWorld()));
+    if (spec == "gm") return alias((UObject*)GetGameMode(GetWorld()));
+    if (spec == "pawn") { APlayerController* pc = GetFirstLocalPlayerController(GetWorld()); return alias(pc ? UE_FIELD(UObject*, pc, es2off::AController::Pawn) : nullptr); }
+    if (spec == "netdriver") return alias((UObject*)GetNetDriver(GetWorld()));
     UObject* o = FindObject(spec);
     if (!o) {
         // maybe a class name
@@ -124,7 +127,7 @@ void CmdClass(const console::Args& a, std::string& out) {
     // functions: walk Children (UField*) of each struct in chain
     out += "functions:\n";
     for (UClass* k = c; k; k = GetSuperClass(k)) {
-        for (UObject* f = UE_FIELD(UObject*, k, es2off::UStruct::Children); f; f = UE_FIELD(UObject*, f, 0x28 /*UField::Next*/)) {
+        for (UObject* f = UE_FIELD(UObject*, k, es2off::UStruct::Children); f; f = UE_FIELD(UObject*, f, es2off::UField::Next)) {
             out += Format("  %s::%s flags=0x%X parms=%d\n", GetName((UObject*)k).c_str(), GetName(f).c_str(), UE_FIELD(uint32_t, f, es2off::UFunction::FunctionFlags), (int)UE_FIELD(uint8_t, f, es2off::UFunction::NumParms));
         }
     }
@@ -205,17 +208,21 @@ void CmdCall(const console::Args& a, std::string& out) {
     if (a.size() < 3) { out = "usage: call <obj> <Function> [int/float args...]  (simple params only)\n"; return; }
     std::string err; UObject* o = ResolveObject(a[1], err);
     if (!o) { out = err + "\n"; return; }
-    // calling a function on a class name -> use its CDO (static BlueprintFunctionLibrary functions)
-    if (GetClass(o) == GetClass((UObject*)GetClass(o))) o = GetDefaultObject((UClass*)o);
+    // calling a function on a class name -> use its CDO (static BlueprintFunctionLibrary functions).
+    // IsA(ClassClass) rather than "its class is exactly Class", so Blueprint-generated classes count too.
+    if (IsA(o, ClassClass())) { o = GetDefaultObject((UClass*)o); if (!o) { out = "class has no default object\n"; return; } }
     UFunction* fn = FindFunction(o, a[2].c_str());
     if (!fn) { out = "function not found: " + a[2] + "\n"; return; }
     int parmsSize = UE_FIELD(uint16_t, fn, es2off::UFunction::ParmsSize);
     std::vector<char> parms(parmsSize + 16, 0);
-    // fill params in order from args (ints/floats/bools/strings)
+    // fill params in order from args (ints/floats/bools/strings). A UFunction's property list also
+    // carries its LOCAL variables (Blueprint functions especially), which sit past ParmsSize — writing an
+    // argument into one of those overran the parms buffer. Only CPF_Parm properties take arguments.
+    constexpr uint64_t CPF_Parm = 0x80, CPF_ReturnParm = 0x400;
     auto props = GetProperties((UStruct*)fn, false);
     size_t ai = 3;
     for (auto& p : props) {
-        if (p.Flags & 0x400 /*CPF_ReturnParm*/) continue;
+        if (!(p.Flags & CPF_Parm) || (p.Flags & CPF_ReturnParm)) continue;
         if (ai >= a.size()) break;
         const std::string& v = a[ai++];
         if (p.TypeName == "ObjectProperty" || p.TypeName == "ClassProperty") {
@@ -224,9 +231,18 @@ void CmdCall(const console::Args& a, std::string& out) {
             if (!e2.empty()) out += "  warn: param " + p.Name + ": " + e2 + "\n";
         } else if (!SetPropValueFromString(parms.data(), p, v)) out += "  warn: could not set param " + p.Name + " (" + p.TypeName + ")\n";
     }
+    if (ai < a.size()) out += Format("  warn: %d extra argument(s) ignored\n", (int)(a.size() - ai));
     ProcessEvent(o, fn, parms.data());
     out += "called " + a[2] + "\n";
-    for (auto& p : props) if (p.Flags & 0x400) out += "  return " + PropValueToString((UObject*)parms.data(), p) + "\n";
+    for (auto& p : props) if (p.Flags & CPF_ReturnParm) out += "  return " + PropValueToString((UObject*)parms.data(), p) + "\n";
+    // ProcessEvent leaves the caller owning every parameter/return value; release the engine-allocated
+    // buffers we put in (or got back) so a string-taking call does not leak an FMemory block per use.
+    for (auto& p : props) {
+        if (!(p.Flags & CPF_Parm)) continue;
+        char* at = parms.data() + p.Offset;
+        if (p.TypeName == "StrProperty") ((FString*)at)->Reset();
+        else if (p.TypeName == "ArrayProperty") ((TArray<char>*)at)->FreeData();   // element buffer only
+    }
 }
 
 void CmdFunc(const console::Args& a, std::string& out) {
@@ -284,9 +300,11 @@ void CmdSubclasses(const console::Args& a, std::string& out) {
     UClass* c = FindClass(a[1]);
     if (!c) { out = "class not found\n"; return; }
     int max = a.size() > 2 ? atoi(a[2].c_str()) : 100; int n = 0;
-    UClass* classClass = GetClass((UObject*)c);
+    // Every class object, not only native ones: Blueprint classes are instances of
+    // BlueprintGeneratedClass / WidgetBlueprintGeneratedClass, which IsA(Class) covers.
+    UClass* classClass = ClassClass();
     ForEachObject([&](UObject* o) {
-        if (GetClass(o) != classClass) return true;
+        if (!classClass || !IsA(o, classClass)) return true;
         if (!IsChildOf((UStruct*)o, (UStruct*)c)) return true;
         if (n++ < max) out += Format("%p %s\n", (void*)o, GetPathName(o).c_str());
         return true;

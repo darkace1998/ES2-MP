@@ -271,12 +271,26 @@ def main():
 
     # The destruction explosion is a host-local actor (BP_Explosion_Base_C has RemoteRole ROLE_None), so
     # it never replicates -- the client has to spawn its own or the enemy just blinks out.
+    # The client trails the host here by design: the host announces the death, the message crosses, and
+    # the client defers one tick off the receive path before running the Blueprint. Sampling once right
+    # after a kill reads that latency as a failure, so wait for it to converge instead.
     ds = counter(HOST, 'deathsSent')
     dp = counter(CLIENT, 'deathsPlayed')
-    if ds > 0:
-        check('client plays the destruction explosion', dp == ds, f'host reported {ds} deaths, client played {dp}')
+    for _ in range(10):
+        if ds > 0 and dp >= ds: break
+        time.sleep(2)
+        ds, dp = counter(HOST, 'deathsSent'), counter(CLIENT, 'deathsPlayed')
+    # The host also kills NPCs that were never replicated to the client, so deathsSent > deathsRx is
+    # expected and is NOT a fault. The invariant that must hold is on the client alone: every death it
+    # was actually told about either played or is accounted for as a lost proxy.
+    rx = counter(CLIENT, 'deathsRx')
+    lost = counter(CLIENT, 'deathsNoActorAtRx') + counter(CLIENT, 'deathsNoActorAtDrain')
+    if rx > 0:
+        check('client plays the destruction explosion', dp == rx and lost == 0,
+              f'client was told of {rx} deaths and played {dp}, lost {lost}'
+              f' (host killed {ds} in total; the rest were never replicated to it)')
     else:
-        print('INFO  destruction explosion: nothing died during this run — not exercised')
+        print(f'INFO  destruction explosion: client was told of no deaths this run (host killed {ds}) — not exercised')
 
     rs = con(HOST, 'respawn')
     check('co-op death handling armed', 'respawn=1' in rs and 'vetoGameOverPawn=1' in rs, rs.strip().split('\n')[0][:90])
