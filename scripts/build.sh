@@ -28,4 +28,10 @@ set -e
 grep -E 'error|warning: (unused|format)' "$OUT/build.log" | grep -vE 'libcxx|_LIBCPP|nullability' | head -40 || true
 if [[ $rc -ne 0 || ! -f "$OUT/dwmapi.dll" ]]; then echo "BUILD FAILED (see $OUT/build.log)"; exit 1; fi
 ls -la "$OUT/dwmapi.dll"
-echo "exports:"; llvm-readobj --coff-exports "$OUT/dwmapi.dll" | grep -E '^\s+Name:' | tr -s ' ' | tr '\n' ' '; echo
+# The export list is a sanity check (the game imports exactly these four), not a build requirement --
+# don't fail the build on a machine or CI image without llvm tools.
+if command -v llvm-readobj >/dev/null 2>&1; then
+  echo "exports:"; llvm-readobj --coff-exports "$OUT/dwmapi.dll" | grep -E '^\s+Name:' | tr -s ' ' | tr '\n' ' '; echo
+else
+  echo "exports: (llvm-readobj not installed, skipping check)"
+fi

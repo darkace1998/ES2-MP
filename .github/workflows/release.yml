@@ -1,0 +1,111 @@
+name: build
+
+# The mod is self-contained to build: the SDK headers it compiles against (sdk/gen/*.h) and MinHook are
+# both committed, so a runner needs nothing but zig -- no game install and no PDB.
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write        # needed by the release job; the build job only reads
+
+env:
+  # Pinned to the same zig the mod is developed with, and checksummed: the toolchain decides the ABI of
+  # every hooked function, so "whatever is latest" is not good enough here.
+  ZIG_VERSION: '0.16.0'
+  ZIG_SHA256: '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zig ${{ env.ZIG_VERSION }}
+        run: |
+          set -euo pipefail
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -sSfL --retry 3 -o zig.tar.xz "$url"
+          echo "${ZIG_SHA256}  zig.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/zig" && tar xJf zig.tar.xz -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "ZIG=$RUNNER_TEMP/zig/zig" >> "$GITHUB_ENV"
+
+      - name: Build dwmapi.dll
+        run: ZIG="$ZIG" scripts/build.sh
+
+      - name: Verify the DLL
+        run: |
+          set -euo pipefail
+          dll=mod/build/dwmapi.dll
+          file "$dll" | tee /dev/stderr | grep -q 'PE32+ executable' || { echo "not a PE32+ image"; exit 1; }
+          # The game imports exactly these four; if any is missing the proxy will not load.
+          for fn in DwmFlush DwmIsCompositionEnabled DwmGetCompositionTimingInfo DwmSetWindowAttribute; do
+            grep -qa "$fn" "$dll" || { echo "missing export: $fn"; exit 1; }
+          done
+          echo "all four Dwm* exports present, $(stat -c%s "$dll") bytes"
+
+      - name: Package
+        id: pkg
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then ver="${GITHUB_REF#refs/tags/v}"; else ver="dev-${GITHUB_SHA::7}"; fi
+          # The mod refuses to init unless the game's PE timestamp matches the one baked into the SDK
+          # headers, so publish which build this DLL is for rather than leaving users to find out.
+          stamp=$(grep -oE 'PE_TIMESTAMP = [0-9]+' sdk/gen/rvas.h | grep -oE '[0-9]+')
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "stamp=$stamp" >> "$GITHUB_OUTPUT"
+          name="ES2-MP-${ver}-win64"
+          mkdir -p "dist/$name"
+          cp mod/build/dwmapi.dll "dist/$name/"
+          cp README.md LICENSE "dist/$name/"
+          cp docs/INSTALL.md "dist/$name/INSTALL.md"
+          # python3 rather than `zip`: always present, one less image assumption.
+          (cd dist && python3 -m zipfile -c "${name}.zip" "$name/")
+          cp mod/build/dwmapi.pdb "dist/dwmapi-${ver}.pdb"
+          ls -lh dist
+          echo "zip=dist/${name}.zip" >> "$GITHUB_OUTPUT"
+          echo "pdb=dist/dwmapi-${ver}.pdb" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ES2-MP-${{ steps.pkg.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ steps.pkg.outputs.version }}
+          STAMP: ${{ steps.pkg.outputs.stamp }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          Co-op multiplayer mod for Everspace 2 — a \`dwmapi.dll\` proxy, host-authoritative listen server.
+
+          **This build is pinned to one game build.** The mod checks the game exe's PE timestamp against
+          \`${STAMP}\` and disables itself (with a line in its log) if they differ, so it will not
+          misbehave against a different patch — it simply will not activate until it is rebuilt.
+
+          ### Install
+          Drop \`dwmapi.dll\` next to \`ES2-Win64-Shipping.exe\` in
+          \`steamapps/common/EVERSPACE™ 2/ES2/Binaries/Win64/\`.
+          On Linux/Proton also add the launch option \`WINEDLLOVERRIDES="dwmapi=n,b" %command%\` — that is
+          the single most common thing people miss. Full instructions are in \`INSTALL.md\` in the zip.
+
+          ### Verify it loaded
+          Reach the main menu and look for a **MULTIPLAYER** entry under NEW GAME.
+
+          \`dwmapi-${VER}.pdb\` is attached separately, for symbolising a crash callstack
+          (\`scripts/crash.sh\`); it is not needed to play.
+
+          Not affiliated with Rockfish Games. For use with your own copy of the game.
+          EOF
+          gh release create "v${VER}" \
+            --title "v${VER}" \
+            --notes-file notes.md \
+            "${{ steps.pkg.outputs.zip }}" \
+            "${{ steps.pkg.outputs.pdb }}"
