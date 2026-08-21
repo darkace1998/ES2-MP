@@ -22,7 +22,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install zig ${{ env.ZIG_VERSION }}
         run: |
@@ -69,7 +69,7 @@ jobs:
           echo "zip=dist/${name}.zip" >> "$GITHUB_OUTPUT"
           echo "pdb=dist/dwmapi-${ver}.pdb" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ES2-MP-${{ steps.pkg.outputs.version }}
           path: dist/*
