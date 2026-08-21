@@ -1,12 +1,15 @@
-name: build
+name: release
 
 # The mod is self-contained to build: the SDK headers it compiles against (sdk/gen/*.h) and MinHook are
 # both committed, so a runner needs nothing but zig -- no game install and no PDB.
+#
+# Tags only. Ordinary pushes do not build here: the DLL is only useful against the one game build its
+# SDK headers were generated from, so a green tick on an arbitrary commit would say very little, and
+# every run costs a full toolchain download. workflow_dispatch stays for building a candidate by hand
+# (it produces the artifact but skips the release step, which is guarded on the ref being a tag).
 on:
   push:
-    branches: ['**']
     tags: ['v*']
-  pull_request:
   workflow_dispatch:
 
 permissions:
