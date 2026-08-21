@@ -259,3 +259,237 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
 - **Mission records that only one side has.** The client applies deltas to existing `FTaskSaveGameData` records; creating one from scratch (320 bytes with TArray/TMap members) is deliberately not attempted.
 
 ## Perf note (user tip): prefer `-dx11` (DXVK) over DX12 (vkd3d) on this machine.
+
+## Code audit (2026-08-21): 16 bugs found and fixed, verify.py 25/25
+
+A full read-through of `mod/src`, `scripts/` and `tools/`. Everything below was fixed and re-verified
+against a live host+client session. Grouped by what would have bitten first.
+
+**Would hang or corrupt the game**
+- `console::Dispatch`/`RunNow` built the "unknown command" reply *while holding* `g_cmdsMutex`, and
+  `HelpText()` takes the same non-recursive mutex — one typo (`staus`) deadlocked the TCP thread with
+  the lock held, so every later console command hung, and the game thread froze the moment a queued job
+  or `menu`'s `console::Dispatch` needed it. Lookup now copies the entry and releases the lock first.
+- `hooks.cpp`'s `std::map` was written from the init thread while the console thread (`hooks`) and the
+  game thread (`combat damageblock`, via `hooks::Enable`) read it. Added a mutex.
+- `call <obj> <Fn> <args...>` walked the UFunction's whole property list, which also contains its LOCAL
+  variables (past `ParmsSize`). One extra argument therefore wrote past the parms buffer — heap
+  corruption inside the game. Now only `CPF_Parm` properties take arguments, extras are reported.
+- `menu`'s `CopySlotSettings` copied `[Size .. end of UVerticalBoxSlot)`, and the class ends with the
+  private `SVerticalBox::FSlot* Slot` (+0x58). The snapshots are taken *before* `RemoveChild` frees that
+  FSlot, so every re-added menu row got a dangling Slate pointer stamped into it (and our own row
+  aliased Continue's). Now copies only the reflected settings and re-applies them through the slot's
+  own setters, with a `static_assert` on the layout.
+
+**Wrong behaviour**
+- A timed-out console job stayed queued and ran later anyway — after the caller had been told it failed
+  and had re-issued it, so `LoadGame`/`listen`/`connect` could run twice. It is withdrawn on timeout.
+- The console bound "the first free port in `[base, base+9]`" even when `ES2COOP_CONSOLE_PORT` pinned
+  one, while the harness records the *requested* port: with a straggler on 27100 the tests silently
+  drove the wrong instance. A pinned port is now exact-or-nothing (and says so in the log).
+- `connect steam.<id>` *persisted* the Steam driver mode and opened the P2P accept gate on a machine
+  that is a client, not a host — a later `listen` then came up on SteamNetDriver unasked. The address
+  now selects the transport for that connection only.
+- `ClearRichPresence` takes no key; `SetConnectPresence("")` was wiping *every* rich-presence key the
+  game had set. Use `SetRichPresence("connect", "")`.
+- `ConnectString()` hardcoded `:7777` while `listen <port>` stored the real one (for Steam the URL port
+  *is* the P2P channel, so an invite on another port could never connect). It uses `travel::ListenPort()`.
+- An invitee clicking a lobby slot armed hosting too, so the next map ran `connect` **and** `listen`.
+  The two arms are now exclusive, and inviting is refused while joining.
+- `MT|` was parsed with `%127[^|]` scansets, which *fail on an empty field*: a task with no location
+  silently never got its station applied. Split by hand.
+- `FName::Make(std::string)` widened bytes instead of decoding UTF-8 (the sibling `FString` ctor decodes),
+  so any non-ASCII name became a new garbage entry in the name table.
+- `FindClass("/Script/ES2")` passed no class filter to `StaticFindObject`, so a package (or any object
+  at that path) came back as a `UClass*` and was then walked as one — and cached.
+- `subclasses` and `call <BPClass>` tested "its class is exactly `Class`", which is false for every
+  Blueprint class; both now test `IsA(ClassClass())`.
+- Actor/component-keyed caches in `combat` and the pawn latches in `loadout` were never cleared on a
+  world change. UObject addresses are recycled, so a stale key is a *wrong answer*, not just dead weight
+  (a new NPC inheriting `announcedDead` never gets its explosion). Added `OnWorldChanged()` to both,
+  called from coop's world-change branch.
+- `T|`/`PT|` accepted `nan`/`inf` (`%lf` parses them) and fed them to `SetActorTransform` +
+  `SetPhysicsLinearVelocity`; `coop hz 0` divided by zero. Both rejected/clamped now.
+- A Steam persona containing `|` or `=` corrupted every later entry of the `ROSTER` message.
+
+**Rejected after investigation** — `IsValidObject` looked wrong: it documents "not garbage" but only
+checks that the pointer is in `GUObjectArray`, so a destroyed actor reads as live for up to a GC cycle.
+Making it strict broke three checks: `RebindStaleChildWidgets` detects a stale HUD child precisely by
+reading a *retired* pawn's component, and `ActorFromNetGuid` could no longer resolve a dying NPC, so
+death FX were lost. The semantics are load-bearing. Reverted, documented, and `IsGarbage()` added for
+callers that genuinely want "not pending-kill". **Never tighten `IsValidObject` again.**
+
+## NPC jitter, measured properly (2026-08-21)
+
+All numbers from `jitter <guid> [sec]` on the CLIENT, same moving scout (~12000 uu/s), interleaved runs,
+~190 samples per 10 s window. Two metrics: *deviation* = distance from that actor's own
+`ReplicatedMovement` read in the same tick (lag), *sd/mean* and *jerk* = frame-to-frame step consistency
+(smoothness). Run-to-run noise within one condition is large (404 vs 622 u on the same setting), so only
+differences bigger than that are worth anything.
+
+| condition | deviation (mean) | sd/mean | worst jerk |
+|---|---|---|---|
+| simulating, position only (shipped behaviour) | 513 u | 0.67 | 2.9x |
+| simulating, position+velocity+rotation | 580 u | 0.68 | 3.4x |
+| **kinematic**, position+rotation, rate 12 | 717 u | **0.30** | **1.87x** |
+| kinematic, position+rotation, rate 25 | 531 u | 0.54 | 2.59x |
+| kinematic, position+rotation, rate 40 | 556 u | 0.53 | 2.32x |
+
+- **Writing the replicated velocity onto the body does NOT help** (the obvious fix, and it is wrong).
+  `NpcFollowTick` runs from the `UGameEngine::Tick` detour *before* the world ticks, so physics integrates
+  a full frame AFTER our write; handing it the full velocity overshoots the target by ~v*dt (~600 u at the
+  20 fps this box manages with two instances). Left in behind `combat npcvel 0/1`, default OFF.
+- **Making the proxy kinematic is what works.** `call 0x<rootcomp> SetSimulatePhysics 0` on one NPC more
+  than doubled smoothness (sd/mean 0.74 -> 0.30, jerk 3.30x -> 1.87x) — removing the competing integration,
+  not correcting it harder, is the win. Cost is lag, which is then purely a tuning parameter: rate 25 gets
+  the deviation back to the shipped 513 u while still being smoother (0.54 vs 0.67). Rotation following
+  becomes mandatory in that mode (`combat npcrot 0/1`) because nothing else orients a proxy; note rotation
+  replicates as `ByteComponents` (~1.4 deg/axis), so it will want smoothing.
+- **Chase rate trades lag against smoothness monotonically** (12 -> 25 -> 40: deviation 717/531/556,
+  sd/mean 0.30/0.54/0.53). A chase filter cannot win both; fixed-delay interpolation over a snapshot
+  buffer is the way to get both, at a constant known latency.
+- **Frame rate dominates the perception on this machine, and it is NOT the mod.** Two instances run at
+  ~21 fps (host 22.9, client 20.3); with the mod's per-frame NPC work switched off (`combat npchp 0`,
+  `npcfollow 0`, `npcaim 0`, `aimsync 0`) the rate was identical (22.9 / 20.4). At 21 fps a ship at
+  12000 uu/s moves ~570 u per frame, which is the same size as the effect being measured. Do not tune
+  smoothing against a 21 fps reference.
+- **"Damage is not registering" was a feedback problem, not a data problem.** Counters over one session:
+  client fireSent 56 -> host fireApplied 56; host dmgSent 112 -> client dmgShown 112; deathsRx 6 ->
+  deathsPlayed 6, none lost; npcHpApplied 177; client and host FocusLocation agreed to <100 u. Every hit
+  is applied and reported. What a client never gets is ES2's own impact presentation: both
+  `ApplyESPointDamage` and `ApplyESRadialDamage` are disabled there (they reach the null AESGameModeBase),
+  and that path is what produces impact flashes, shield ripples and hit reactions. The mod re-adds only
+  the floating numbers, the hitmarker and the death explosion — so shots look like they pass through.
+  Mirroring the impact FX the way NPC deaths already are is the fix.
+
+### Kinematic client proxies (2026-08-21) — and a vtable trap worth remembering
+`combat npckinematic 0/1` (default ON, client only): each replicated ship proxy this tick drives has its
+root body switched to non-simulating, and is then moved purely by our follow code. Measured win on one
+scout: step spread sd/mean 0.74 -> 0.30, worst jerk 3.30x -> 1.87x mean. Notes:
+- **`UPrimitiveComponent::SetSimulatePhysics` is virtual AND ES2 overrides it**
+  (`UMovementRootComponent::SetSimulatePhysics`) — and `UMovementRootComponent` is exactly what every
+  ship's `CollisionRoot0` is. Calling the `UPrimitiveComponent` RVA directly silently runs the base
+  implementation. It must go through the vtable (`ue::vt::UPrimitiveComponent_SetSimulatePhysics` = 213).
+  This was nearly shipped as an RVA call: the live console proof (`call 0x<root> SetSimulatePhysics 0`)
+  went through reflection/ProcessEvent, which dispatches virtually — so the experiment worked while the
+  implementation would not have. **Check `grep -F '::<Fn>(<args>)' sdk/symbols.tsv | cut -f4 | sort -u`
+  for overrides before calling any virtual by RVA.**
+- The "is it simulating?" check is a direct flag read (`UPrimitiveComponent::BodyInstance +
+  FBodyInstance::bSimulatePhysics_off`), not a call, because it runs per proxy per frame. Re-checking
+  every frame also makes the conversion self-healing: anything that re-enables simulation is undone on
+  the next tick, whatever the cause.
+- Rotation following is forced on in this mode — a kinematic proxy has nothing else to orient it.
+- Our own ship is never touched (ROLE_AutonomousProxy is filtered out); it must keep simulating because
+  the client is authoritative over its own movement.
+
+### Kinematic proxies: the measurements that shipped it
+Same actor, interleaved, two rounds each (`jitter <guid> 10` on the client).
+
+Kinematic vs simulating, on a scout at ~10000 uu/s:
+
+| | deviation (lag) | sd/mean | worst jerk | max step |
+|---|---|---|---|---|
+| kinematic  | 555 / 594 u | **0.29 / 0.24** | **1.75x / 1.01x** | 729 / 704 u |
+| simulating | **354 / 338 u** | 0.68 / 0.69 | 2.92x / 2.62x | 1206 / 1201 u |
+
+2.6x smoother and 40% smaller worst step, at the cost of ~230 u more lag. Both conditions repeated
+tightly, unlike the earlier velocity experiment — this is a real effect, not noise.
+
+The lag has a specific cause and is largely recoverable: this tick runs from the `UGameEngine::Tick`
+detour, i.e. BEFORE the world ticks and draws, so what we write is displayed one frame later. Predicting
+to `now + dt` (`combat lead 0/1`, default on) cancels most of it. On a GB fighter at ~3000 uu/s:
+
+| | deviation (lag) | sd/mean |
+|---|---|---|
+| lead on  | **87 / 85 u** | 0.31 / 0.32 |
+| lead off | 221 / 208 u | 0.19 / 0.30 |
+
+60% less lag for a slight, noisy smoothness cost (extrapolating further amplifies the whole-number
+quantization on the replicated velocity). Absolute numbers are not comparable between the two tables —
+different NPC, ~3x different speed.
+
+### Kinematic proxies: validation
+- `verify.py` 23/23 with kinematic on by default — but three checks degraded to INFO that run (no enemies
+  in range), so the combat paths were NOT covered by it. Forced separately: client parked next to an
+  outlaw and firing, host dmgSent 45 -> 139, client dmgShown 45 -> 138 (one still in flight at sample
+  time), host deathsSent 0 -> 2, client deathsRx 2 -> deathsPlayed 2 with deathsNoActorAtRx=0 and
+  deathsNoActorAtDrain=0, npcHpApplied 43 -> 203. Death FX in particular still work: `SpawnExplosion`
+  runs fine on a kinematic actor.
+- Nothing re-enables simulation: `madeKinematic` stayed at 12 with `tracked=12` across a whole fight,
+  i.e. each proxy was converted exactly once (the counter increments on every SetSimulate(false), so a
+  fight over the flag would show up as it climbing).
+- Ramming a kinematic NPC is safe: teleporting the client onto one left it at +113 uu with velocity 0 —
+  depenetrated, not stuck, not launched — console still responsive, and the host agreed on the position
+  exactly (client-authoritative movement sync unaffected).
+- The toggle restores properly (`combat kinematic 0` -> restored=6, bodies simulating again).
+
+## Why NPC death explosions are inconsistent on a client (2026-08-21)
+
+Three observed behaviours — some explode, some just vanish, some explode *then* tumble out of control
+*then* vanish. Two causes, and one plausible hypothesis that measurement killed.
+
+**1. "Just vanishes": the class has no `SpawnExplosion`.** It is a `BP_ShipBase_C` function, and only the
+ship branch inherits it. Class chains read live:
+- ship   `BP_Ship_Player_C -> BP_ShipBase_C -> BP_PawnBase_C -> ESPawn` — HAS `SpawnExplosion` (parms=0)
+- turret `BP_Turret_Homebase_Station_C -> BP_Turret_Stationary_Base_C -> BP_TurretBase_C -> BP_PawnBase_C -> ESPawn` — only `ESPawn::Die` (parms=3)
+- anemone `BP_Cave_Anemone_Small_C -> BP_Cave_Anemone_Base_C -> BP_PawnBase_C -> ESPawn` — none
+
+`ClientDeathFxTick` does `if (!fn || NumParms != 0) continue;` — a **silent** skip that increments no
+counter, so it is invisible in `combat` output, and it makes verify's `deathsPlayed == deathsRx` check
+fail with no indication why. Any non-ship ESPawn therefore dies without an explosion.
+
+**2. "Explode, then out-of-control, then vanish": the FX fires at the START of the death sequence.**
+The host announces on hull<=0.001 (`H_HealthDepleted`), deliberately early so the client can still
+resolve the NetGUID. But hull-zero is where ES2's death sequence *begins*: the ship then tumbles out of
+control and only explodes and is destroyed at the end (host ships were observed sitting at `hp=0.000`
+in the actor list). So the client plays the explosion immediately, keeps faithfully following the host's
+dying ship as it tumbles — much more visible now that proxies are kinematic and smooth — and the ship
+only disappears when the host finally destroys it.
+
+**3. REFUTED: the mirrored `NH` hull=0 does not start a local death.** Suspected the client's own
+Blueprint ran its death sequence off `SetCurrentHitpointsWithRatio(0)`. Tested directly on an unattacked
+turret (client-only call, no host involvement): the client's copy was still alive 17 s later and the
+host's copy was untouched. An earlier apparent positive was contamination from a live fight. The setter
+really does not run the depletion path.
+
+**Fix directions.** (a) Stop depending on a ship-only Blueprint function: spawn the explosion actor
+ourselves at the dying actor's transform (the host spawns `BP_Explosion_Base_C`, `RemoteRole=ROLE_None`,
+which is why it never replicates), which works for every class — and count the skips instead of
+`continue`. (b) Trigger on the real explosion rather than on hull-zero: keep the early `ND` so the client
+can resolve and CACHE the actor pointer, then fire the FX on a second message sent when the host actually
+destroys/explodes the ship (`AESPawn::Destroyed`, or detecting the host's own `SpawnExplosion` call), so
+no late guid resolution is needed.
+
+### Death FX: fixed (2026-08-21)
+Both causes above are addressed in combat.cpp.
+
+**Timing.** `ND` no longer plays anything; it only records "the host says this actor is dead" in a
+`g_dying` set. The FX is played from a new hook on **`AESPawn::Destroyed`** (client), i.e. the frame our
+copy actually goes away — which is when the host really destroyed it, after its out-of-control sequence.
+Two things fall out of that for free:
+- the guid-resolution race disappears: inside `Destroyed` the actor is by definition still valid, so
+  "could not resolve in time" is no longer a way to lose an explosion;
+- relevancy loss cannot cause a false explosion, because only actors the host announced are in the set.
+A `g_dyingDeadline` (8 s) safety net still plays the FX if our copy somehow outlives the announcement,
+so an explosion is never silently dropped; `fxTimeout` counts those.
+
+**Class independence.** `SpawnExplosion` is used when the class has it (ships), otherwise the mod now
+spawns `BP_Explosion_Base_C` itself at the actor's transform via
+`UGameplayStatics::BeginDeferredActorSpawnFromClass` + `FinishSpawningActor` (TSubclassOf by hidden
+pointer, FTransform by const&). The class is found by scanning for the class object, since it is
+Blueprint-generated and `FindClass`'s short-name path only sees native classes. Verified live: on a
+turret `noFn=1 fallbackSpawned=1 failed=0` and a real `BP_Explosion_Base_C_2147420239` instance appeared
+in the level; on a ship `played=1 fallbackSpawned=0 noFn=0`, i.e. it still uses the ship's own function.
+
+New counters (`combat`): `fxAtDestroy`, `fxTimeout`, `pendingDying`, `noSpawnExplosionFn`,
+`fallbackSpawned`, `fallbackFailed` — the old silent `continue` is gone. `combat fxtest <guid>` plays the
+FX on demand so both paths can be exercised without waiting for a kill, and `combat fxfallback 0/1`
+disables the spawned-actor path.
+
+**Validated live.** `verify.py` 23/23 on this build (its explosion check degraded to INFO — no enemies in
+range that run — so it was forced separately). Client killing outlaws: host deathsSent=2 -> client
+deathsRx=2, **fxAtDestroy=2** (both played from the new `Destroyed` hook, i.e. at the real destruction),
+fxTimeout=0, deathsNoActorAtRx=0, deathsNoActorAtDrain=0, deathsPlayed=2; damage 210 sent -> 210 shown.
+Note the enemy mix matters when reading these: drones ARE ships
+(`BP_Outlaw_Drone_C -> BP_DroneBase_C -> BP_Ship_NPC_C -> BP_ShipBase_C`), so they use their own
+`SpawnExplosion`; only the turret/anemone branch takes the spawned-actor fallback.
