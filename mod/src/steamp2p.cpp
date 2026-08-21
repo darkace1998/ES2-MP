@@ -55,14 +55,26 @@ std::string FriendName(uint64_t steamId) {
     const char* n = (get && f && steamId) ? get(f, steamId) : nullptr;
     return n ? n : std::string();
 }
+// Steam appends the connect string to the accepting friend's command line VERBATIM — it is the whole
+// argument, not just a value, so the "+connect " belongs in the string we publish. Getting this wrong is
+// silent and total: a real invite launched the friend with `... ES2 steam.<id>:7777`, our own parser
+// looks for "+connect ", found nothing, and the join was simply never armed. Prefixing here (rather than
+// at the call sites) means every publisher gets it right; it is idempotent, so a caller that already
+// passed a full argument is left alone.
+static std::string AsLaunchArg(const std::string& addr) {
+    if (addr.empty() || addr.rfind("+connect", 0) == 0) return addr;
+    return "+connect " + addr;
+}
+
 bool OpenInviteOverlay(const std::string& connectString) {
     void* f = FriendsIface();
     if (!f) { LOGF("[steam] no ISteamFriends — is Steam running?"); return false; }
     if (!connectString.empty()) {
-        // Preferred: the friend who accepts is launched with +connect <string>, so no Steam lobby and
-        // no matchmaking callbacks are needed for them to reach us.
+        // The friend who accepts is launched with this on their command line, so no Steam lobby and no
+        // matchmaking callbacks are needed for them to reach us.
+        const std::string arg = AsLaunchArg(connectString);
         auto invite = Sym<void (*)(void*, const char*)>("SteamAPI_ISteamFriends_ActivateGameOverlayInviteDialogConnectString");
-        if (invite) { invite(f, connectString.c_str()); LOGF("[steam] invite overlay opened (connect '%s')", connectString.c_str()); return true; }
+        if (invite) { invite(f, arg.c_str()); LOGF("[steam] invite overlay opened (connect '%s')", arg.c_str()); return true; }
     }
     auto overlay = Sym<void (*)(void*, const char*)>("SteamAPI_ISteamFriends_ActivateGameOverlay");
     if (overlay) { overlay(f, "friends"); LOGF("[steam] friends overlay opened"); return true; }
@@ -75,7 +87,9 @@ void SetConnectPresence(const std::string& connectString) {
     if (!set) return;
     // An empty value removes just this key. (ISteamFriends::ClearRichPresence takes no key argument —
     // calling it here wiped every rich-presence key the game had set, not only "connect".)
-    set(f, "connect", connectString.c_str());
+    const std::string arg = AsLaunchArg(connectString);
+    set(f, "connect", arg.c_str());
+    if (!arg.empty()) LOGF("[steam] rich presence connect='%s'", arg.c_str());
 }
 std::string ConnectString() {
     uint64_t id = LocalSteamId();      // flat API first: the OSS path hands back a TSharedPtr we never release

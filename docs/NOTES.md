@@ -493,3 +493,60 @@ fxTimeout=0, deathsNoActorAtRx=0, deathsNoActorAtDrain=0, deathsPlayed=2; damage
 Note the enemy mix matters when reading these: drones ARE ships
 (`BP_Outlaw_Drone_C -> BP_DroneBase_C -> BP_Ship_NPC_C -> BP_ShipBase_C`), so they use their own
 `SpawnExplosion`; only the turret/anemone branch takes the spawned-actor fallback.
+
+## Steam invites never armed the join (2026-08-22)
+
+From a real two-account attempt (logs in run/TEST): the host sent the invite, the invitee launched, and
+nothing happened. The invitee's own command line was the whole story:
+
+```
+cmdline: "...\ES2-Win64-Shipping.exe" ES2 steam.76561198076335468:7777
+```
+
+**Steam appends the `connect` rich-presence string to the accepting friend's command line VERBATIM.** It
+does not add a `+connect` of its own — the key is documented as *the command line*, so the prefix has to
+be part of what we publish. We published the bare address while `CheckInviteCommandLine` searched for
+`"+connect "`, so the two halves of our own protocol disagreed and the join was never armed, silently.
+Fixed at the publish points (`steamp2p::SetConnectPresence` / `OpenInviteOverlay` prefix it themselves,
+idempotently, so no caller can get it wrong), and the parser now accepts either form — it tokenises the
+command line honouring quotes and takes a `+connect <addr>` pair or a lone token that looks like a
+connect address. Unit-tested against the real failing command line plus negatives (a quoted install path
+containing `steam.stuff:1` must not match).
+
+Two further defects the same logs exposed:
+- **The host advertised Steam but hosted on IpNetDriver** (`netdriverdef GameNetDriver -> IpNetDriver` in
+  the host log) — the menu path never selected the transport, and it cannot be selected after the fact
+  because `EnableListenServer` only creates a net driver when the world has none. Now a lobby-slot invite
+  sets the intent and the menu runs `netdriver steam` immediately before its `listen`, which also opens
+  the P2P accept gate. Deliberately tied to the INVITE, not to the MULTIPLAYER toggle: the toggle also
+  covers LAN hosting, where joiners arrive by IP and a SteamNetDriver would lock them out.
+- **There was no "joining" state.** `LobbyLine()` only had ON/OFF, so an invitee saw "MULTIPLAYER: ON",
+  which reads as "I am hosting" — the opposite of what was about to happen. INSTALL.md already promised
+  `JOINING A FRIEND`; it exists now.
+
+Also worth remembering from that host log: it armed hosting and sent invites but never loaded a save, so
+no listen server was ever created. Arming is not hosting — the map has to come up.
+
+### The lobby overview drew over the settings screen (2026-08-22)
+The four lobby slots are parented to the main menu's ROOT canvas and added last, so they hold the highest
+Z-order there and painted over whatever sub-page the menu raised — opening Settings left the overview
+sitting on top of the graphics options, covering the Display Mode / Resolution / HDR / V-Sync values.
+Their visibility was driven by `LobbyVisible()` alone, which knows nothing about which page is showing.
+
+The signal is ES2's own `WG_MainMenu_New_C::IsInRootMenu()` (0 params, bool return), so the fix covers
+every sub-page rather than just the reported one. Two more obvious candidates are both wrong here:
+- **`SwitcherSubPages->ActiveWidgetIndex`** is already 1 (`WG_Menu_Main_OptionsScreen_C`) while the front
+  page is displayed — the sub-pages live in a WidgetSwitcher whose index does not mean "this is on screen".
+  Index 0 is a blank Image, 2 `WG_NewGame_C`, 3/4 `WG_LoadOrSaveGame_C`. The root page's buttons are not in
+  the switcher at all.
+- **The `Visibility` UPROPERTY is the designer value**, not runtime state: switcher, options page, our
+  button and `BoxAllButtons` all read `SelfHitTestInvisible(4)` regardless of what is on screen. (Widgets
+  we drive ourselves are the exception — `SetVisibility` does update their property.)
+
+`menu` now prints `lobbyVisible/frontPage/(slots shown)/pendingJoin/steamTransport` so this is checkable
+without screenshots. Measured across the transition: front page 1/1/1, sub-page open 1/0/0, back 1/1/1.
+
+Note when testing menu navigation from the console: `call <ButtonOptions> OnBtnClicked` and
+`call <menu> OnOptionsPressed` set the navigation state (IsInRootMenu flips) without necessarily running
+the visual transition, and calling them out of order can leave the menu drawn as neither page. That is an
+artefact of driving Blueprint navigation directly, not a mod bug — `InitRootPage` puts it back.

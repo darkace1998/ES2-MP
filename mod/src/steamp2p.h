@@ -11,6 +11,10 @@ void SetHosting(bool on);
 uint64_t LocalSteamId();                 // 0 if Steam is unavailable
 std::string PersonaName();               // this player's Steam name ("" if unavailable)
 std::string FriendName(uint64_t steamId);
+// Both take the ADDRESS ("steam.<id>:<port>"); they publish it as the accepting friend's command-line
+// argument, adding the "+connect " prefix themselves — Steam appends the string verbatim, so the prefix
+// has to be part of it or the invitee's mod never sees a join request.
+//
 // Opens Steam's invite dialog carrying a connect string, so the friend who accepts is launched
 // straight into our session. Falls back to the plain friends list when the dialog is unavailable.
 bool OpenInviteOverlay(const std::string& connectString);

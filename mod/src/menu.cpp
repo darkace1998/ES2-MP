@@ -64,6 +64,9 @@ static bool g_armHost = false;
 // so it has to load a save first — connecting straight from the menu would put it in a default ship.
 static std::string g_pendingJoin;
 static bool g_joinChecked = false;
+// Set when the player invites a friend over Steam: the listen server that follows has to come up on
+// SteamNetDriver (and with the P2P accept gate open) or the invite cannot connect to it.
+static bool g_useSteamTransport = false;
 // Kept across `menu rebuild` (which deliberately clears the cache) so a rebuild replaces our entry
 // instead of stacking another copy into the box.
 static UObject* g_slots[players::kMaxPlayers] = {};
@@ -130,7 +133,10 @@ static void SetButtonText(UObject* button, const std::string& text) {
 // UPanelWidget offers no InsertChildAt, so the entry doubles as its own status line.
 static bool LobbyVisible();
 static std::string LobbyLine() {
-    // Just the state — who is in the lobby is what the overview on the right is for.
+    // Just the state — who is in the lobby is what the overview on the right is for. An invitee gets a
+    // state of its own: "ON" reads as "I am hosting", which is the opposite of what is about to happen,
+    // and without it an accepted invite looked like nothing had happened at all.
+    if (!g_pendingJoin.empty()) return "MULTIPLAYER:  JOINING A FRIEND";
     return LobbyVisible() ? "MULTIPLAYER:  ON" : "MULTIPLAYER:  OFF";
 }
 
@@ -148,6 +154,7 @@ static void OnMultiplayerClicked() {
     if (g_armHost || !g_pendingJoin.empty()) {
         g_armHost = false;
         g_pendingJoin.clear();
+        g_useSteamTransport = false;             // else a later LAN host would silently come up on Steam
         steamp2p::SetConnectPresence("");        // stop advertising "Join Game" to friends
         LOGF("[menu] multiplayer OFF");
     } else {
@@ -271,20 +278,54 @@ static void CallBool(UObject* obj, const char* fname, bool v) {
 
 static bool LobbyVisible() { return g_armHost || !g_pendingJoin.empty() || coop::CurrentRole() != coop::Role::None; }
 
-// Read "+connect <addr>" out of our own command line once.
+// Split a command line on whitespace, honouring quotes — so nothing can match inside the quoted exe
+// path (which on a normal install contains "SteamLibrary\steamapps\...").
+static std::vector<std::string> TokenizeCmdline(const std::string& s) {
+    std::vector<std::string> out;
+    std::string cur;
+    bool q = false;
+    for (char c : s) {
+        if (c == '"') { q = !q; continue; }
+        if (!q && (c == ' ' || c == '\t')) { if (!cur.empty()) { out.push_back(cur); cur.clear(); } continue; }
+        cur += c;
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+// "steam.<id>:<port>", or a bare "<ip>:<port>".
+static bool LooksLikeConnectAddr(const std::string& t) {
+    if (t.rfind("steam.", 0) == 0) return t.find(':') != std::string::npos;
+    size_t c = t.rfind(':');
+    if (c == std::string::npos || c == 0 || c + 1 >= t.size()) return false;
+    if (t.find('.') == std::string::npos || t.find('.') > c) return false;
+    for (size_t i = 0; i < c; ++i) if (!isdigit((unsigned char)t[i]) && t[i] != '.') return false;
+    for (size_t i = c + 1; i < t.size(); ++i) if (!isdigit((unsigned char)t[i])) return false;
+    return true;
+}
+
+// Find the address a Steam invite launched us with.
+//
+// Steam appends the host's connect string to our command line VERBATIM — it does NOT add a "+connect"
+// of its own. This used to look only for "+connect ", so when the host published a bare address the
+// invitee started with `... ES2 steam.<id>:7777`, nothing matched, and the join was never armed with no
+// hint in the log as to why. The host now publishes the full argument, and this accepts either form:
+// a "+connect <addr>" pair, or a lone token that looks like a connect address (which also covers an
+// invite sent by an older build).
 static void CheckInviteCommandLine() {
     if (g_joinChecked) return;
     g_joinChecked = true;
-    std::wstring cl = GetCommandLineW();
-    std::string s8 = es2coop::WideToUtf8(cl);
-    size_t at = s8.find("+connect ");
-    if (at == std::string::npos) return;
-    size_t b = at + 9;
-    while (b < s8.size() && s8[b] == ' ') ++b;
-    size_t e = s8.find_first_of(" \t\"", b);
-    std::string addr = s8.substr(b, e == std::string::npos ? std::string::npos : e - b);
+    const std::string s8 = es2coop::WideToUtf8(GetCommandLineW());
+    const std::vector<std::string> toks = TokenizeCmdline(s8);
+    std::string addr;
+    for (size_t i = 1; i + 1 < toks.size(); ++i)
+        if (toks[i] == "+connect") { addr = toks[i + 1]; break; }
+    if (addr.empty())                                     // start at 1: never look at the exe path
+        for (size_t i = 1; i < toks.size(); ++i)
+            if (LooksLikeConnectAddr(toks[i])) { addr = toks[i]; break; }
     if (addr.empty()) return;
     g_pendingJoin = addr;
+    g_lastStatus.clear();                                 // make the entry redraw as "JOINING A FRIEND"
     LOGF("[menu] launched from a Steam invite -> will join '%s' once a game is loaded", addr.c_str());
 }
 
@@ -336,8 +377,29 @@ static void BuildLobbySlots(UObject* canvas, UClass* buttonClass, APlayerControl
     g_slotBox = canvas;
 }
 
+// The lobby slots hang off the menu's ROOT canvas and are added last, so they have the highest Z-order
+// there and draw over whatever sub-page the menu puts up — opening Settings left the overview sitting on
+// top of the graphics options. They have to follow the front page.
+//
+// ES2 answers this itself: WG_MainMenu_New_C::IsInRootMenu(). Using the game's own predicate covers every
+// sub-page (Settings, Load, Save, New Game), not just the one that was reported. The obvious-looking
+// alternatives do not work: the sub-pages all live in one WidgetSwitcher whose ActiveWidgetIndex is
+// already the Options page while the front page is showing, and the `Visibility` UPROPERTY is the
+// designer value (everything reads SelfHitTestInvisible at runtime, front page or not).
+static bool MenuIsOnFrontPage() {
+    if (!g_menu || !IsValidObject(g_menu)) return false;
+    UFunction* fn = FindFunction(g_menu, "IsInRootMenu");
+    if (!fn) return true;            // unknown build: behave as before rather than hide the overview forever
+    std::vector<uint8_t> parms((size_t)UE_FIELD(uint16_t, fn, es2off::UFunction::ParmsSize) + 16, 0);
+    ProcessEvent(g_menu, fn, parms.data());
+    for (auto& p : GetProperties((UStruct*)fn, false))
+        if ((p.Flags & 0x400 /*CPF_ReturnParm*/) && p.TypeName == "BoolProperty")
+            return PropValueToString((UObject*)parms.data(), p) == "true";
+    return true;
+}
+
 static void UpdateLobbySlots() {
-    const bool vis = LobbyVisible();
+    const bool vis = LobbyVisible() && MenuIsOnFrontPage();
     for (int i = 0; i < players::kMaxPlayers; ++i) {
         UObject* w = g_slots[i];
         if (!w || !IsValidObject(w)) continue;
@@ -357,6 +419,12 @@ static void OnSlotClicked(int i) {
     if (!g_pendingJoin.empty()) { LOGF("[menu] lobby slot %d clicked while joining %s — invites are the host's job", i + 1, g_pendingJoin.c_str()); return; }
     // Hosting has to be armed for the connect string to mean anything to the friend who accepts.
     if (coop::CurrentRole() == coop::Role::None) g_armHost = true;
+    // Inviting over Steam is the one moment we know the join will arrive as Steam P2P, so this is where
+    // the transport gets chosen. It cannot be done at listen time by guessing: EnableListenServer only
+    // creates a net driver when the world has none, so the choice has to be made BEFORE the map loads.
+    // Deliberately not tied to the MULTIPLAYER toggle itself — that also covers LAN hosting, where
+    // joiners come in by IP through the console and a SteamNetDriver would lock them out.
+    g_useSteamTransport = true;
     std::string cs = steamp2p::ConnectString();
     steamp2p::SetConnectPresence(cs);
     LOGF("[menu] lobby slot %d clicked -> Steam invite (%s)", i + 1, cs.empty() ? "no steam id" : cs.c_str());
@@ -439,6 +507,10 @@ void Tick(float dt) {
     } else if (g_armHost && !inMenu && !inTransition && coop::CurrentRole() == coop::Role::None) {
         g_armHost = false;
         LOGF("[menu] map '%s' is up -> starting the listen server", wn.c_str());
+        // Must precede the listen: EnableListenServer only creates a net driver when the world has none,
+        // so a transport chosen afterwards is silently ignored. This also opens the Steam P2P accept
+        // gate, which ES2 otherwise leaves shut and which drops incoming peers without a word.
+        if (g_useSteamTransport) LOGF("[menu] %s", console::Dispatch("netdriver steam", true).c_str());
         std::string r = console::Dispatch("listen 7777", true);
         LOGF("[menu] %s", r.c_str());
         std::string cs = steamp2p::ConnectString();
@@ -486,6 +558,11 @@ static void CmdMenu(const console::Args& a, std::string& out) {
     out += Format("world=%s menu=%p button=%p status=%p clicks=%llu status='%s'\n",
                   WorldName(GetWorld()).c_str(), (void*)g_menu, (void*)g_button, (void*)g_statusButton,
                   (unsigned long long)g_clicks, LobbyLine().c_str());
+    // frontPage is what gates the lobby overview: the slots sit on the menu's root canvas above every
+    // sub-page, so they have to disappear while one is open.
+    out += Format("lobbyVisible=%d frontPage=%d (slots shown=%d) pendingJoin=%s steamTransport=%d\n",
+                  (int)LobbyVisible(), (int)MenuIsOnFrontPage(), (int)(LobbyVisible() && MenuIsOnFrontPage()),
+                  g_pendingJoin.empty() ? "-" : g_pendingJoin.c_str(), (int)g_useSteamTransport);
 }
 
 void Register() {
