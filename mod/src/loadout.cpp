@@ -440,16 +440,22 @@ static bool StartSend() {
     return true;
 }
 
+// One chunk per 50 ms meant the 60-chunk ship blob took ~3.9 s of the join -- and on a machine running at
+// ~21 FPS the accumulator often needed two ticks per chunk, so it was closer to 15 chunks/s than 20.
+// Several chunks per tick is well within UE's reliable window (256 bunches per channel; the whole blob is
+// 60), and it turns the transfer into a rounding error next to the rest of the join.
+static int g_chunksPerTick = 8;
+
 void ClientTick(float dt) {
+    (void)dt;
     if (g_pendingSend.empty()) return;
-    g_sendAccum += dt;
-    if (g_sendAccum < 0.05) return;               // ~20 chunks/s, keeps the reliable buffer happy
-    g_sendAccum = 0;
-    size_t n = g_pendingSend.size() - g_sendOffset;
-    if (n > kChunk) n = kChunk;
-    coop::SendToServer(Format("SD|%d|%d|", g_sendSeq, g_sendTotal) + g_pendingSend.substr(g_sendOffset, n));
-    g_sendOffset += n;
-    ++g_sendSeq;
+    for (int i = 0; i < g_chunksPerTick && g_sendOffset < g_pendingSend.size(); ++i) {
+        size_t n = g_pendingSend.size() - g_sendOffset;
+        if (n > kChunk) n = kChunk;
+        coop::SendToServer(Format("SD|%d|%d|", g_sendSeq, g_sendTotal) + g_pendingSend.substr(g_sendOffset, n));
+        g_sendOffset += n;
+        ++g_sendSeq;
+    }
     if (g_sendOffset >= g_pendingSend.size()) {
         LOGF("[loadout] ship sent (%d chunks)", g_sendSeq);
         g_pendingSend.clear();

@@ -319,6 +319,8 @@ static void H_PopPause() { if (g_role != Role::None) return; o_PopPause(); }
 
 // ---------------------------------------------------------------- tick
 static bool g_helloSent = false;
+static bool g_sawLocalPC = false;
+static int  g_helloTries = 0;
 static UWorld* g_lastWorld = nullptr;
 static double g_helloAccum = 0;
 
@@ -326,7 +328,7 @@ static void OnRoleChanged(Role r) {
     LOGF("[coop] role -> %s (world %s)", RoleName(r), WorldName(GetWorld()).c_str());
     players::Reset();
     loadout::ResetSession();
-    g_helloSent = false; g_welcomed = false; g_helloAccum = 0;
+    g_helloSent = false; g_welcomed = false; g_helloAccum = 0; g_sawLocalPC = false; g_helloTries = 0;
     if (r != Role::None) { ApplyNoPause(); travel::ApplyOriginShiftPolicy(true); }
     combat::SetClientDamageBlock(r == Role::Client);
     if (r == Role::Host) {
@@ -383,7 +385,7 @@ static void Tick(float dt) {
         players::Reset();
         combat::OnWorldChanged();     // pointer-keyed caches (NPC state, HUD/pawn latches) must not survive a map
         loadout::OnWorldChanged();
-        g_helloSent = false; g_welcomed = false; g_helloAccum = 0;
+        g_helloSent = false; g_welcomed = false; g_helloAccum = 0; g_sawLocalPC = false; g_helloTries = 0;
         if (r == Role::Host) {
             players::SetLocalId(0);
             APlayerController* pc = GetFirstLocalPlayerController(w);
@@ -414,9 +416,20 @@ static void Tick(float dt) {
         // (and therefore the loadout transfer behind it) until the host's placeholder ship had been
         // spawned and replicated back, which measured 18-25 s. If we do send during a transition map,
         // the world-change reset below clears g_welcomed and we simply say hello again.
-        if (!g_welcomed && GetFirstLocalPlayerController(GetWorld())) {
-            g_helloAccum += dt;
-            if (!g_helloSent || g_helloAccum > 2.0) { SendToServer("HELLO|" + LocalPlayerName()); g_helloSent = true; g_helloAccum = 0; }
+        if (!g_welcomed) {
+            // Instrumentation for join latency: the gap between the host's PostLogin and its first HELLO
+            // measured ~7 s, and it matters whether that is us waiting for a local PlayerController to
+            // exist or our message sitting in the channel. Log both edges once per join.
+            const bool havePC = GetFirstLocalPlayerController(GetWorld()) != nullptr;
+            if (havePC && !g_sawLocalPC) { g_sawLocalPC = true; LOGF("[coop] local PlayerController is up -- saying hello"); }
+            if (havePC) {
+                g_helloAccum += dt;
+                if (!g_helloSent || g_helloAccum > 0.75) {
+                    SendToServer("HELLO|" + LocalPlayerName());
+                    LOGF("[coop] HELLO sent (attempt %d)", ++g_helloTries);
+                    g_helloSent = true; g_helloAccum = 0;
+                }
+            }
         }
         g_sendAccum += dt;
         if (g_sendAccum >= 1.0 / g_sendHz) { g_sendAccum = 0; SendLocalTransform(); }
@@ -516,8 +529,17 @@ void OnInit() {
 // called from the net.cpp login hooks
 void OnPostLogin(APlayerController* pc) {
     if (CurrentRole() != Role::Host) return;   // single-player map loads fire PostLogin too
-    players::RegisterController(pc);
+    players::Player* pl = players::RegisterController(pc);
     world_state::OnPlayerJoined(pc);
+    // Hand the joiner its id unprompted instead of making it wait for a HELLO round trip. The client
+    // sends its first HELLO the moment it has a local PlayerController, which measured 122 ms BEFORE
+    // this function finished -- so that one is dropped and the id costs a full retry interval. We
+    // already know the id here. HELLO stays as the fallback (and is what carries the player's name),
+    // and WELCOME is idempotent on the client, so arriving twice is harmless.
+    if (pl) {
+        SendToClient(pc, Format("WELCOME|%d|%d", pl->id, players::Count()));
+        BroadcastRoster();
+    }
 }
 void OnLogout(APlayerController* pc) { players::UnregisterController(pc); }
 }

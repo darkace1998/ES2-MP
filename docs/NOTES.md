@@ -743,3 +743,37 @@ in research 05 (flagged crash-grade by 09) — re-read it before use.
 
 `world items 1` enables an off-by-default log of every `UInventoryLib::AddItemToRespectiveInventory`
 grant, on whichever machine runs it, so one real mission completion answers the question.
+
+## Join latency: the mod's share is now ~1s of it (2026-08-24)
+
+Measured host-side from `PostLogin` to the joiner flying its own ship, which is the span the mod can
+affect. Two samples after the change agree; the phase breakdown is what matters:
+
+| phase | before | after |
+|---|---|---|
+| `PostLogin` → `WELCOME` (joiner knows its id) | ~6.5 s | **0.31 s** |
+| `WELCOME` → stream starts (client's level load) | — | 6.69 s *(not ours)* |
+| ship blob on the wire (60 chunks) | 3.9 s | **0.35 s** |
+| apply (respawn with own ship) | 0.4 s | 0.41 s |
+| **total** | **11.2 s** | **7.76 s** |
+
+**The blob was paced at one chunk per 50 ms.** Worse than it reads: at this machine's ~21 FPS the
+accumulator often needed two ticks per chunk, so 60 chunks took 3.9 s at ~15 chunks/s. Sending several
+per tick (8, `shipdata rate N`) is far inside UE's reliable window — 256 bunches per channel against a
+whole blob of 60 — and the transfer became a rounding error.
+
+**The first HELLO is always dropped.** Instrumenting both edges showed the client sends it the instant it
+has a local `PlayerController`, which measured **122 ms _before_ the host finished `PostLogin`** — so it
+lands on a host that is not ready, and the id then costs a full retry interval. The host already knows
+the id at registration, so it now sends `WELCOME` unprompted from `coop::OnPostLogin`. `HELLO` stays as
+the fallback and as what carries the player's name, and `WELCOME` is idempotent on the client, so
+arriving twice is harmless. The retry also went 2.0 s → 0.75 s.
+
+**The remaining 6.7 s is ES2 loading the level, and no protocol change can touch it.** Between `WELCOME`
+and the stream the client logs *nothing* — no HELLO retries, no export failures, no ticks — because the
+engine is streaming the level and `UGameEngine::Tick` is not running, so neither is ours. The join cannot
+finish before that anyway: the player is not in the world yet. Proving this was the point of the
+`local PlayerController is up` / `HELLO sent (attempt N)` log lines, which are worth keeping.
+
+So the mod's own contribution is now 0.31 + 0.35 + 0.41 ≈ **1.07 s**, down from ~4.3 s. Chasing the total
+below ~7 s means making ES2 load faster, which is not this mod's business.

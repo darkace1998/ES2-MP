@@ -23,6 +23,10 @@ it is regenerated and rebuilt.
 - **A rejoining client took a fresh player slot** instead of the one it left, which enough dock cycles
   would walk off the end of the 4-slot registry.
 - **An invited friend joins from the title screen**, with no save to load first.
+- **Joining is faster.** The ship transfer was paced at one chunk per 50 ms (3.9 s for a typical
+  loadout) and the joiner's id waited on a HELLO that is always dropped because it races the host's
+  PostLogin. The host now hands the id over unprompted and the blob streams several chunks per tick:
+  the mod's share of a join went from ~4.3 s to ~1 s. The rest of the wait is ES2 loading the level.
 
 ### Added
 - **Mission rewards now reach the client.** Only the host runs mission logic, so a client used to finish
