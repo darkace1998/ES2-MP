@@ -7,7 +7,17 @@ Every release is pinned to one game build: the mod compares the game exe's PE ti
 baked into its SDK headers and disables itself if they differ, so after a game patch it stays inert until
 it is regenerated and rebuilt.
 
-## [Unreleased]
+## [0.2.0] - 2026-08-24
+
+### Added
+- **Docking works in co-op.** Docking is a level transition, not an animation, so a docked player used to
+  drag everyone else into the station map. Each player now docks alone and a client rejoins the host by
+  itself on the way out.
+- **Mission rewards now reach the client.** Only the host runs mission logic, so a client used to finish
+  a mission and be paid nothing. XP, credits and job score are mirrored and applied to each player's own
+  save. Mission *item* rewards are not covered yet.
+- **An invited friend joins from the title screen**, with no save to load first.
+- `objtop`, `uiwatch` and `tools/dump_stackscan.py` for diagnosing object leaks and minidumps.
 
 ### Fixed
 - **The host ran out of UObjects and crashed after two client joins.** ES2's player-controller Blueprint
@@ -15,24 +25,16 @@ it is regenerated and rebuilt.
   so a listen server built one for every joining client and never freed it: ~500,000 objects per join,
   against UE's 2,162,688 ceiling. The host now suppresses widget creation while spawning a remote
   player's controller. Host object count is flat across repeated joins (687,683 -> 687,723 over three),
-  and the host keeps exactly one UI -- its own.
-- **A docked player no longer drags everyone into the station.** Docking is a level transition, so each
-  player docks alone and a client rejoins the host automatically on the way out.
+  and the host keeps exactly one UI -- its own. This also blocked 3-4 player sessions, where the third
+  joiner would have crossed the ceiling.
 - **The respawn watchdog fought docking.** It treated any non-ship pawn as death, respawning docked
   players every 5s and leaking a pawn per cycle; only ES2's game-over pawn counts as death now.
 - **A rejoining client took a fresh player slot** instead of the one it left, which enough dock cycles
   would walk off the end of the 4-slot registry.
-- **An invited friend joins from the title screen**, with no save to load first.
 - **Joining is faster.** The ship transfer was paced at one chunk per 50 ms (3.9 s for a typical
   loadout) and the joiner's id waited on a HELLO that is always dropped because it races the host's
   PostLogin. The host now hands the id over unprompted and the blob streams several chunks per tick:
   the mod's share of a join went from ~4.3 s to ~1 s. The rest of the wait is ES2 loading the level.
-
-### Added
-- **Mission rewards now reach the client.** Only the host runs mission logic, so a client used to finish
-  a mission and be paid nothing. XP, credits and job score are mirrored and applied to each player's own
-  save. Mission *item* rewards are not covered yet.
-- `objtop`, `uiwatch` and `tools/dump_stackscan.py` for diagnosing object leaks and minidumps.
 
 ## [0.1.1] - 2026-08-22
 
@@ -81,5 +83,6 @@ listen server built on the engine's own actor replication.
 - NPC explosions were inconsistent — they now play when the ship is actually destroyed rather than when
   its hull reaches zero, and no longer depend on a Blueprint function that only ships have.
 
+[0.2.0]: https://github.com/darkace1998/ES2-MP/releases/tag/v0.2.0
 [0.1.1]: https://github.com/darkace1998/ES2-MP/releases/tag/v0.1.1
 [0.1.0]: https://github.com/darkace1998/ES2-MP/releases/tag/v0.1.0
