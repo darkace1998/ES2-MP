@@ -7,6 +7,26 @@ Every release is pinned to one game build: the mod compares the game exe's PE ti
 baked into its SDK headers and disables itself if they differ, so after a game patch it stays inert until
 it is regenerated and rebuilt.
 
+## [Unreleased]
+
+### Fixed
+- **The host ran out of UObjects and crashed after two client joins.** ES2's player-controller Blueprint
+  builds a complete in-game menu (map, inventory, perks) in its BeginPlay with no local-controller check,
+  so a listen server built one for every joining client and never freed it: ~500,000 objects per join,
+  against UE's 2,162,688 ceiling. The host now suppresses widget creation while spawning a remote
+  player's controller. Host object count is flat across repeated joins (687,683 -> 687,723 over three),
+  and the host keeps exactly one UI -- its own.
+- **A docked player no longer drags everyone into the station.** Docking is a level transition, so each
+  player docks alone and a client rejoins the host automatically on the way out.
+- **The respawn watchdog fought docking.** It treated any non-ship pawn as death, respawning docked
+  players every 5s and leaking a pawn per cycle; only ES2's game-over pawn counts as death now.
+- **A rejoining client took a fresh player slot** instead of the one it left, which enough dock cycles
+  would walk off the end of the 4-slot registry.
+- **An invited friend joins from the title screen**, with no save to load first.
+
+### Added
+- `objtop`, `uiwatch` and `tools/dump_stackscan.py` for diagnosing object leaks and minidumps.
+
 ## [0.1.1] - 2026-08-22
 
 ### Fixed

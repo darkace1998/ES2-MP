@@ -6,6 +6,8 @@
 #include <windows.h>
 #include <cstdlib>
 #include <algorithm>
+#include <unordered_map>
+#include <vector>
 
 using namespace ue;
 using es2coop::Format;
@@ -68,6 +70,33 @@ void CmdExec(const console::Args& a, std::string& out) {
     if (cmd.empty()) { out = "usage: exec <console command>\n"; return; }
     bool ok = ExecConsoleCommand(cmd);
     out += ok ? "executed: " + cmd + "\n" : "no world\n";
+}
+
+// objtop [N] - live UObject count, histogrammed by class.
+//
+// `status objects=` reads FChunkedFixedUObjectArray::NumElements, which is the array's HIGH-WATER MARK:
+// freed indices go on a free list and are reused, but the count never shrinks. That makes it useless for
+// telling a leak from churn -- forcing a GC does not move it either. This walks the array, counts the
+// entries that actually hold an object, and names the classes holding them, so two samples can be
+// diffed to see what grew.
+void CmdObjTop(const console::Args& a, std::string& out) {
+    int topN = a.size() > 1 ? atoi(a[1].c_str()) : 15;
+    int32_t n = NumObjects();
+    std::unordered_map<void*, int> byClass;
+    byClass.reserve(4096);
+    int live = 0;
+    for (int32_t i = 0; i < n; ++i) {
+        UObject* o = ObjectAt(i);
+        if (!o) continue;
+        ++live;
+        ++byClass[(void*)GetClass(o)];
+    }
+    std::vector<std::pair<void*, int>> v(byClass.begin(), byClass.end());
+    std::sort(v.begin(), v.end(), [](const auto& x, const auto& y) { return x.second > y.second; });
+    out += Format("slots=%d live=%d free=%d classes=%zu\n", (int)n, live, (int)n - live, v.size());
+    for (int i = 0; i < (int)v.size() && i < topN; ++i)
+        out += Format("  %8d  %s\n", v[i].second,
+                      v[i].first ? GetName((UObject*)v[i].first).c_str() : "(null class)");
 }
 
 void CmdObjects(const console::Args& a, std::string& out) {
@@ -320,6 +349,7 @@ void RegisterBasic() {
     console::Register("status", "world / netmode / player summary", CmdStatus);
     console::Register("exec", "exec <UE console command>", CmdExec);
     console::Register("objects", "objects <Class> [max] [filter] - list live objects of class", CmdObjects);
+    console::Register("objtop", "objtop [N] - live UObject count, histogrammed by class", CmdObjTop);
     console::Register("actors", "actors <Class> [max] - actors in GWorld with location/role", CmdActors);
     console::Register("class", "class <Class> - chain, properties, functions", CmdClass);
     console::Register("peek", "peek <obj|0xaddr> <hexOff> [count] [q|d|b] - raw memory", CmdPeek);

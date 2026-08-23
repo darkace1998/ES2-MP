@@ -64,6 +64,8 @@ RVAS = {
     'UNetConnection_LowLevelGetRemoteAddress': 'public: virtual class FString __cdecl UNetConnection::LowLevelGetRemoteAddress(bool)',
     'UNetConnection_LowLevelDescribe': 'public: virtual class FString __cdecl UNetConnection::LowLevelDescribe(void)',
     'APlayerController_ClientMessage': 'public: void __cdecl APlayerController::ClientMessage(class FString const &, class FName, float)',
+    'AGameModeBase_SpawnPlayerControllerCommon': 'protected: virtual class APlayerController * __cdecl AGameModeBase::SpawnPlayerControllerCommon(enum ENetRole, struct UE::Math::TVector<double> const &, struct UE::Math::TRotator<double> const &, class TSubclassOf<class APlayerController>)',
+    'UWidgetBlueprintLibrary_Create': 'public: static class UUserWidget * __cdecl UWidgetBlueprintLibrary::Create(class UObject *, class TSubclassOf<class UUserWidget>, class APlayerController *)',
     'AGameModeBase_PostLogin':  'public: virtual void __cdecl AGameModeBase::PostLogin(class APlayerController *)',
     'AGameModeBase_RestartPlayer': 'public: virtual void __cdecl AGameModeBase::RestartPlayer(class AController *)',
     'AGameModeBase_SpawnDefaultPawnAtTransform_Implementation': 'public: virtual class APawn * __cdecl AGameModeBase::SpawnDefaultPawnAtTransform_Implementation(class AController *, struct UE::Math::TTransform<double> const &)',

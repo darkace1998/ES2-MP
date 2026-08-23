@@ -625,3 +625,70 @@ slot (observed: player 1 came back as player 2), and enough dock cycles would wa
 Also noted while looking: `coop::OnLogout` is declared, defined and **never called** — nothing hooks
 `Logout`. `AGameModeBase::Logout` exists in the PDB but `AESGameModeBase`'s vtable dump does not settle
 whether ES2 overrides it, so it was left alone rather than hooked on a guess.
+
+## The host was leaking half a million UObjects per join (2026-08-23)
+
+The "host dies on a client's second reconnect" wall turned out not to be a lifetime bug at all. The fatal
+reads:
+
+```
+LowLevelFatalError [UObjectArray.cpp:612]
+Maximum number of UObjects (2162688) exceeded when trying to add 1 object(s)
+```
+
+**Every client join made the host build ~500,000 UObjects that were never freed.** Measured on the host:
+1,181,281 objects at session start, flat while the client was away (byte-identical histograms), and
+1,691,657 the moment it rejoined — +510,058 in the single frame `PostLogin` ran. Two joins cross the
+2,162,688 ceiling, which is exactly why one dock round trip worked and the second killed the host. A
+healthy instance sits at ~677k.
+
+**Root cause: ES2 builds a full in-game menu for every player controller, local or not.** The stack from
+inside the widget hook:
+
+```
+UWidgetBlueprintLibrary::execCreate      <- BP "Create Widget", class WG_Menu_Ingame_C
+UObject::ProcessEvent (the BP BeginPlay graph)
+AActor::BeginPlay / APlayerController::BeginPlay / AESPlayerController::BeginPlay
+AActor::DispatchBeginPlay / FinishSpawning
+UGameplayStatics::FinishSpawningActor
+```
+
+`BP_PlayerController_C`'s BeginPlay graph creates `WG_Menu_Ingame_C` and its map / inventory / perk tabs
+with no `IsLocalController` check — in a single-player game there was never a second controller to check
+for. A listen server spawns a controller for each joining client, so the host built a second (and third)
+complete menu UI it can never display: ~1,700 user widgets, each dragging a tree of `Image` /
+`OverlaySlot` / `HorizontalBoxSlot` children. They stay referenced — a forced `obj gc` freed none.
+
+**Fix:** bracket `AGameModeBase::SpawnPlayerControllerCommon` and suppress
+`UWidgetBlueprintLibrary::Create` for the duration when the controller is a remote joiner. That funnel is
+the right place: both `SpawnPlayerController` overloads reach it and it calls `FinishSpawningActor`
+itself, so the whole burst happens inside one call. Blocking the 4 top-level creations is enough — the
+children are built during the top widget's own initialisation, so ~500k objects never happen.
+
+Host objects across three dock cycles after the fix: 687,683 → 687,723 → 687,723 → 687,723. Flat, three
+rejoins survived, and the host's widget population now matches the client's exactly (327
+`WG_Inventory_Slot_C`, 132 `WG_Map_Location_Icon_C`, 53 `WG_HUD_EquipmentSlot_C` on both), i.e. it keeps
+exactly one UI — its own.
+
+**`ENetRole` is the signal, not `NetConnection`.** The first attempt bracketed
+`AESPlayerController::BeginPlay` and asked whether the controller had a `NetConnection`. It never fired
+once: UE assigns the connection *after* `Login` returns, so at BeginPlay time it is null for everybody.
+`SpawnPlayerControllerCommon` takes the role directly — `ROLE_SimulatedProxy` (1) is the listen server's
+own local player, `ROLE_AutonomousProxy` (2) is a remote joiner (confirmed live: role 1 "keeping its UI",
+role 2 "suppressed").
+
+### Tools this needed
+
+`status objects=` reads `FChunkedFixedUObjectArray::NumElements`, the array's **high-water mark**: freed
+indices go on a free list and are reused, but the number never shrinks, and forcing a GC does not move
+it. It cannot tell a leak from churn. Two new instruments:
+
+- **`objtop [N]`** — walks the object array, counts entries that actually hold an object, and histograms
+  them by class. Two samples diffed are what identified the widgets.
+- **`uiwatch [on|off|block 0/1|clear|trace N]`** — census of Blueprint-created widgets by owning
+  controller, with `trace N` capturing a backtrace for the next N creations. `block` toggles the fix.
+- **`tools/dump_stackscan.py`** — UE's crash XML carried a single `ntdll` frame, so `crash.sh` could show
+  nothing. This walks the crashing thread's stack in `UEMinidump.dmp` and symbolizes every value pointing
+  into the exe or the mod. It is a scan, not an unwind, so stale frames show too — but it is what turned
+  "one ntdll frame" into the two stacks above. Note the `MINIDUMP_THREAD` layout: `Teb` sits at +16 and
+  the stack descriptor at +24; reading the former as the latter yields an empty range.

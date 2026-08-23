@@ -73,10 +73,11 @@ scripts/logs.sh [-f] [N]            # newest mod log: <game>/ES2/Binaries/Win64/
 python3 scripts/logof.py <port>     # which log belongs to which instance
 scripts/crash.sh [N]                # symbolized N-th newest UE crash (ES2 frames via sdk/funcs.pkl, mod frames via mod/build/dwmapi.pdb)
 python3 tools/symbolize_dll.py mod/build/dwmapi.pdb 0x<off>
+python3 tools/dump_stackscan.py <crashdir>/UEMinidump.dmp    # real stack when crash.sh shows one ntdll frame
 ```
 Each module registers a status command printing its counters/switches — `coop players net combat loot
 respawn attribution menu hooks` by name, plus `shipdata` (loadout), `travelinfo` (travel — the `travel`
-command is net.cpp's ServerTravel), `guard`/`spawnlog` (authority), `world`/`missions` (world_state),
+command is net.cpp's ServerTravel), `guard`/`spawnlog`/`uiwatch` (authority), `world`/`missions` (world_state),
 `steam` (steamp2p). The tests assert on those counters. Log lines carry a bracket tag that is not always
 the module name (`[coop] [net] [loadout] [travel] [world] [dmg] [steam] [menu] …`).
 
@@ -203,7 +204,8 @@ Line-based TCP on `127.0.0.1:<port>`, replies end with `<<END>>`. With `ES2COOP_
 `run/<name>.port` is always right; only an unpinned launch scans 27100–27109.
 `console::Register(name, help, handler, onGameThread=true)`; handlers append to `out`. Game-thread
 commands block up to 30 s waiting for the tick — a timeout means the game is on a loading screen.
-`commands.cpp` has the generic inspection set (`objects/actors/props/class/func/call/set/exec/find`);
+`commands.cpp` has the generic inspection set (`objects/actors/props/class/func/call/set/exec/find`, plus
+`objtop` — live UObject count histogrammed by class, since `status objects=` is only the array high-water mark);
 object args accept `0xADDR`, a path name, or `world|pc|pawn|gm|gi|engine|netdriver`.
 
 ## Rules that cost a crash or a silent failure (details in `docs/NOTES.md` "Hard-won gotchas")

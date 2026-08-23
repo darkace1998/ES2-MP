@@ -101,7 +101,7 @@ static void H_PostLogin(AGameModeBase* gm, APlayerController* pc) {
     LOGF("[net] AGameModeBase::PostLogin gm=%s pc=%s", GetFullName((UObject*)gm).c_str(), GetFullName((UObject*)pc).c_str());
     o_PostLogin(gm, pc);
     coop::OnPostLogin(pc);
-    LOGF("[net] PostLogin done");
+    LOGF("[net] PostLogin done (frame %llu)", (unsigned long long)*Rva<uint64_t>(es2rva::GFrameCounter));
 }
 static void H_RestartPlayer(AGameModeBase* gm, void* c) {
     LOGF("[net] RestartPlayer controller=%s", GetFullName((UObject*)c).c_str());
