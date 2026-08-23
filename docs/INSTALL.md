@@ -99,9 +99,21 @@ Turning MULTIPLAYER back **OFF** also stops advertising "Join Game" to your frie
 
 ### Joining
 
-Accept the Steam invite. Your game launches, the menu shows `MULTIPLAYER: JOINING A FRIEND`, and you
-then **load your own save** — you fly *your* ship with *your* loadout, which is read from your save, so
-you need one loaded before the connection completes. The join happens automatically once you are in.
+Accept the Steam invite and wait — that is the whole procedure. Your game launches and joins by itself
+from the title screen: no key to press, no save to load, no menu to navigate. You still fly *your* ship
+with *your* loadout, because the game has already restored your player data (the same data behind the
+Continue button) by the time the join happens.
+
+If your friend has not started their game yet, that is fine: the join retries for about three minutes,
+so it does not matter who is ready first.
+
+Two things worth knowing:
+
+- **Do not press a key past the title screen while waiting.** Joining from the main menu crashes the
+  game — that is ES2's own behaviour, not the mod's — so the mod will not do it. If you end up in the
+  menu, just start or load a game and it will connect from there.
+- If you have never played the game before, you will join in the starter ship, since that is the only
+  player data you have.
 
 ### LAN / direct IP (no Steam)
 
@@ -125,8 +137,10 @@ Delete `dwmapi.dll` (and `dwmapi.pdb`, if present) from `ES2/Binaries/Win64/`, a
 - **Up to 4 players.** Two is the tested configuration.
 - **Save handling.** Each player keeps their own ship, loadout and progression from their own save.
   World and mission progress follows the host.
-- **Joining a friend who is already in-game** works when your game is launched by the invite. Clicking
-  Join while your game is already running is not wired up yet.
+- **Joining works when your game is launched by the invite.** Clicking Join while your game is already
+  running is not wired up yet, and an invite cannot be accepted from the main menu either — travelling
+  to a host from that screen crashes the game (ES2's own bug), so the mod waits until you start or load
+  a game instead.
 - **Aim is not perfectly synced.** Other players' weapon fire is mirrored as trigger state, so it reads
   as plausible rather than frame-exact.
 - The mod is pinned to one game build and will disable itself after a game update until rebuilt.

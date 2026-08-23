@@ -550,3 +550,26 @@ Note when testing menu navigation from the console: `call <ButtonOptions> OnBtnC
 `call <menu> OnOptionsPressed` set the navigation state (IsInRootMenu flips) without necessarily running
 the visual transition, and calling them out of order can leave the menu drawn as neither page. That is an
 artefact of driving Blueprint navigation directly, not a mod bug — `InitRootPage` puts it back.
+
+## An invited client no longer has to load a game (2026-08-23)
+
+The join used to wait for a gameplay map, on the reasoning that "a client's own ship is rebuilt from its
+UPlayerData, so it has to load a save first". **That premise is wrong.** ES2 has already populated
+UPlayerData by the time the title screen is up — it is what the Continue button reads — so a client that
+never loaded a save still owns its real ships and mission records. Verified live: connected straight from
+EntryMap, the host received a 15-16 KB loadout blob, `applied=1`, and the client flew its own ship.
+
+So an armed invite now fires from the **splash (EntryMap)**, ~6 s after it appears: no keypress, no save,
+no menu. Retries every 10 s for ~3 minutes, so it does not matter whether the friend accepts before or
+after the host starts its game — measured end to end with `launch.sh client -- +connect <addr>`: attempts
+1-3 failed while nothing was listening, the host came up, and attempt 4 connected with the loadout applied.
+
+**Not from the main menu.** A client travel out of `Map_MainMenu` crashes the game
+(EXCEPTION_ACCESS_VIOLATION reading 0x0). That is ES2's own behaviour: it reproduces with this module
+disabled (`menu on 0`), so it is not the injected widgets or the ProcessEvent hook. An invitee who has
+already pressed past the splash is told, in the log, to start or load a game instead.
+
+**A failed `open` briefly looks like success.** While a connection attempt is in flight UE flips the
+world's net mode to Client, so `coop::CurrentRole()` reads Client for a moment before bouncing back to
+the splash. The first version of the retry loop took that at face value, logged "joined", cleared the
+pending join and never retried. Success has to mean *client AND in the host's map*, not just the role.

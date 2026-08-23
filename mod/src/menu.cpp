@@ -67,6 +67,11 @@ static bool g_joinChecked = false;
 // Set when the player invites a friend over Steam: the listen server that follows has to come up on
 // SteamNetDriver (and with the P2P accept gate open) or the invite cannot connect to it.
 static bool g_useSteamTransport = false;
+// Join retry state: a friend can accept the invite well before the host has started its game.
+static double g_menuNow = 0;
+static double g_splashSince = 0;
+static double g_nextJoinAttempt = 0;
+static int g_joinAttempts = 0;
 // Kept across `menu rebuild` (which deliberately clears the cache) so a rebuild replaces our entry
 // instead of stacking another copy into the box.
 static UObject* g_slots[players::kMaxPlayers] = {};
@@ -490,21 +495,60 @@ void Tick(float dt) {
     if (g_accum < 0.5) return;
     g_accum = 0;
 
+    g_menuNow += 0.5;                 // this body runs at 2 Hz (see the accumulator above)
+
     UWorld* w = GetWorld();
     const std::string wn = WorldName(w);
     const bool inMenu = wn.find("MainMenu") != std::string::npos;
     const bool inTransition = wn.empty() || wn == "EntryMap" || wn == "EmptyTransitionMap";
+    // The "PRESS ANY KEY" splash. A friend whose game was launched by an invite is sitting right here,
+    // so this is where the join belongs: no keypress, no save to load, no menu to navigate.
+    const bool atSplash = (wn == "EntryMap");
+    if (atSplash && g_splashSince == 0) g_splashSince = g_menuNow;
+    if (!atSplash) g_splashSince = 0;
 
-    // The player armed hosting from the menu; do it the moment a real map is up. Reusing the console
-    // path rather than duplicating it keeps this on the one code path that is already proven (it also
-    // selects the net driver and sets the travel port).
-    if (!g_pendingJoin.empty() && !inMenu && !inTransition && coop::CurrentRole() == coop::Role::None) {
-        std::string addr = g_pendingJoin;
+    // An armed join fires from the splash as well as from a loaded map.
+    //
+    // It used to wait for a gameplay map because "a client's own ship is rebuilt from its UPlayerData,
+    // so it has to load a save first". That premise is wrong: ES2 has already populated UPlayerData by
+    // this point (for the Continue button), and a client that never loaded a save joins with its real
+    // ship — verified live, the host received the 16 KB loadout blob and applied it.
+    //
+    // NOT from the main menu, though: a client travel out of Map_MainMenu crashes the game with a null
+    // dereference. That is ES2's own doing, not ours — it reproduces with this whole module disabled
+    // (`menu on 0`). So an invitee who has already pressed past the splash still has to start a game,
+    // and the log says so rather than silently doing nothing.
+    const bool canJoinHere = (atSplash && g_menuNow - g_splashSince >= 6.0)   // let the engine settle first
+                             || (!inMenu && !inTransition);
+    if (!g_pendingJoin.empty() && coop::CurrentRole() == coop::Role::None && canJoinHere) {
+        if (g_menuNow >= g_nextJoinAttempt) {
+            // Retry rather than fire once: the friend may well accept before the host has started its
+            // game, and there is nothing to connect to until the host's map is up and listening.
+            ++g_joinAttempts;
+            g_nextJoinAttempt = g_menuNow + 10.0;
+            g_armHost = false;        // joining and hosting are exclusive
+            LOGF("[menu] joining %s from '%s' (attempt %d)", g_pendingJoin.c_str(), wn.c_str(), g_joinAttempts);
+            LOGF("[menu] %s", console::Dispatch("connect " + g_pendingJoin, true).c_str());
+            if (g_joinAttempts >= 18) {   // ~3 minutes
+                LOGF("[menu] giving up on the invite to %s — is the host in a game yet?", g_pendingJoin.c_str());
+                g_pendingJoin.clear();
+                g_lastStatus.clear();
+            }
+        }
+    } else if (!g_pendingJoin.empty() && inMenu && coop::CurrentRole() == coop::Role::None) {
+        static bool told = false;
+        if (!told) { told = true; LOGF("[menu] invite to %s is armed, but joining from the main menu crashes ES2 — start or load a game and it will connect", g_pendingJoin.c_str()); }
+    }
+    // Only a client IN THE HOST'S MAP counts as joined. A failed `open` (host not listening yet) still
+    // flips the world to a client net mode for a moment before bouncing back to the splash, and taking
+    // that at face value cleared the pending join and stopped the retries after one attempt.
+    if (!g_pendingJoin.empty() && coop::CurrentRole() == coop::Role::Client && !inMenu && !inTransition) {
+        LOGF("[menu] joined %s after %d attempt(s)", g_pendingJoin.c_str(), g_joinAttempts);
         g_pendingJoin.clear();
-        g_armHost = false;            // joining and hosting are exclusive; `connect` only queues the travel, so the role is still None this tick
-        LOGF("[menu] map '%s' is up -> joining %s", wn.c_str(), addr.c_str());
-        LOGF("[menu] %s", console::Dispatch("connect " + addr, true).c_str());
-    } else if (g_armHost && !inMenu && !inTransition && coop::CurrentRole() == coop::Role::None) {
+        g_joinAttempts = 0;
+        g_lastStatus.clear();
+    }
+    if (g_armHost && !inMenu && !inTransition && coop::CurrentRole() == coop::Role::None) {
         g_armHost = false;
         LOGF("[menu] map '%s' is up -> starting the listen server", wn.c_str());
         // Must precede the listen: EnableListenServer only creates a net driver when the world has none,
