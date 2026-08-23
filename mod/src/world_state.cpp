@@ -41,11 +41,17 @@ using Fn_OnMissionCompleted     = void (*)(void* playerData, void* mission);
 using Fn_ChangeTrackedMission   = void (*)(FName missionId, bool track);
 using Fn_GetPlayerData          = UObject* (*)();
 using Fn_DialogGetSingleton     = UObject* (*)(bool bMenu);
+using Fn_AddNonItemRewards      = void (*)(const void* rewards, const void* missionType, const void* factionGroup, const void* name);
+using Fn_ChangeCredits          = void (*)(int delta, int transferType, bool a, bool b);
+using Fn_IncJobScore            = void (*)(int amount);
+using Fn_AddItemToInventory     = bool (*)(UObject* item, bool b);
 
 static Fn_UpdateTaskInPlayerData o_UpdateTask = nullptr;
 static Fn_EnqueueDialogMember    o_EnqueueDialog = nullptr;
 static Fn_OnMissionCompleted     o_OnMissionCompleted = nullptr;
 static Fn_ChangeTrackedMission   o_ChangeTrackedMission = nullptr;
+static Fn_AddNonItemRewards      o_AddNonItemRewards = nullptr;
+static Fn_AddItemToInventory     o_AddItemToInventory = nullptr;
 
 // ---------------------------------------------------------------- state
 struct TaskSnapshot { int state = -1, stage = -1, progress = -1; uint64_t loc = 0, station = 0; std::string id, locStr, stationStr; };
@@ -57,6 +63,9 @@ static inline uint64_t NameKey(const FName& n) { return ((uint64_t)n.ComparisonI
 static bool g_syncMissions = true;
 static bool g_syncDialog = true;
 static bool g_syncXP = true;
+static bool g_syncRewards = true;
+static bool g_logItems = false;      // observability only: who grants items, and on which machine
+static uint64_t g_rewardSent = 0, g_rewardApplied = 0;
 static bool g_applying = false;          // re-entrancy guard for our own writes
 static uint64_t g_taskSent = 0, g_taskApplied = 0, g_dlgSent = 0, g_dlgApplied = 0, g_xpSent = 0;
 static float g_xpApplied = 0;
@@ -224,6 +233,71 @@ static bool ApplyXP(const std::string& body) {
     return true;
 }
 
+// ---------------------------------------------------------------- mission rewards
+//
+// Only the host runs mission logic, so only the host reaches UMissionLib::AddNonItemRewards: without
+// this a client finishes a mission alongside the host and is paid nothing. The grant set was read off
+// the disassembly at 0x5E71518 rather than taken from docs/research/05 (which claims faction standing
+// and OkkarCredits -- it grants neither):
+//
+//   Rewards.XP       +0x00  int32  -> AddXP.  `cvtdq2ps xmm0, xmm0` -- it is an INT, and reading it as
+//                                    a float hands AddXP a denormal.
+//   Rewards.Credits  +0x04  int32  -> ChangeCredits(credits, *MissionType == Job(2) ? JobReward(5)
+//                                    : Undefined(0), true, false)
+//   Rewards.Standing +0x0C  int32  -> IncJobScore, and only when *FactionGroup != 0
+//
+// (+0x08 OkkarCredits is read by nothing here.) ABI: RCX = const FMissionRewards* by hidden pointer,
+// RDX / R8 = pointers to single enum bytes, R9 = const FName*.
+//
+// Rewards are per-player: each machine applies them to its OWN UPlayerData, which is what keeps the
+// separate saves consistent. The host's own grant is the real call; the client replays the three
+// primitives rather than AddNonItemRewards itself, so it never depends on having the mission's task
+// record (the real function looks one up for its decal unlocks).
+static void H_AddNonItemRewards(const void* rewards, const void* missionType, const void* factionGroup, const void* name) {
+    o_AddNonItemRewards(rewards, missionType, factionGroup, name);
+    if (!g_syncRewards || g_applying || !rewards) return;
+    if (coop::CurrentRole() != coop::Role::Host) return;
+    const uint8_t* r = (const uint8_t*)rewards;
+    const int xp = *(const int*)(r + 0x00), credits = *(const int*)(r + 0x04), standing = *(const int*)(r + 0x0C);
+    const unsigned mt = missionType ? *(const uint8_t*)missionType : 0u;
+    const unsigned fg = factionGroup ? *(const uint8_t*)factionGroup : 0u;
+    if (!xp && !credits && !standing) return;
+    coop::SendToAllClients(Format("MR|%d|%d|%d|%u|%u", xp, credits, standing, mt, fg));
+    ++g_rewardSent;
+    LOGF("[world] mission rewards -> clients: xp=%d credits=%d standing=%d (missionType=%u faction=%u)",
+         xp, credits, standing, mt, fg);
+}
+
+// Mission ITEM rewards are not granted by any native funnel -- AddNonItemRewards deliberately skips them
+// (hence the name) and the payout is Blueprint-driven at a station's claim UI. Two facts decide the
+// design, and only a real mission completion can settle which applies:
+//   * FTaskSaveGameData carries the whole FMissionRewards -- Items included -- at +0xD8, and this module
+//     already mirrors that record to clients, so a client may already know what it is owed.
+//   * With solo docking each player visits the station in their own session, so each could simply claim
+//     their own copy locally, and no item would need to cross the wire at all.
+// ES2 items are procedurally generated, so if a transfer IS needed it has to carry the generated item's
+// state (the pattern loadout.cpp already uses for ships), not the descriptor. Until that is observed,
+// this hook only watches: `world items 1` logs every inventory grant on whichever machine runs it.
+static bool H_AddItemToInventory(UObject* item, bool b) {
+    if (g_logItems)
+        LOGF("[world] item -> inventory: %s (%s)", GetName(item).c_str(), ue::GetObjectClassName(item).c_str());
+    return o_AddItemToInventory(item, b);
+}
+
+static bool ApplyRewards(const std::string& body) {
+    int xp = 0, credits = 0, standing = 0; unsigned mt = 0, fg = 0;
+    if (sscanf(body.c_str(), "%d|%d|%d|%u|%u", &xp, &credits, &standing, &mt, &fg) < 5) return true;
+    g_applying = true;
+    if (xp)      Rva<std::remove_pointer_t<Fn_AddXP>>(es2rva::UGameplayLib_AddXP)((float)xp, false, false, 0.f);
+    if (credits) Rva<std::remove_pointer_t<Fn_ChangeCredits>>(es2rva::UGameplayLib_ChangeCredits)(
+                     credits, mt == 2 ? 5 /*JobReward*/ : 0 /*Undefined*/, true, false);
+    if (standing && fg != 0) Rva<std::remove_pointer_t<Fn_IncJobScore>>(es2rva::UMissionLib_IncJobScore)(standing);
+    g_applying = false;
+    ++g_rewardApplied;
+    LOGF("[world] mission rewards applied: xp=%d credits=%d standing=%d", xp, credits, standing);
+    return true;
+}
+
 // ---------------------------------------------------------------- snapshot on join
 void OnPlayerJoined(APlayerController* pc) {
     if (!g_syncMissions || coop::CurrentRole() != coop::Role::Host || !pc) return;
@@ -246,6 +320,7 @@ bool OnClientOp(const std::string& op, const std::string& body) {
     if (op == "TRK") return ApplyTrackedMission(body);
     if (op == "DLG") return ApplyDialog(body);
     if (op == "XP")  return ApplyXP(body);
+    if (op == "MR")  return ApplyRewards(body);
     return false;
 }
 
@@ -264,11 +339,35 @@ static void CmdWorld(const console::Args& a, std::string& out) {
     if (a.size() > 2 && a[1] == "missions") g_syncMissions = a[2] == "1";
     if (a.size() > 2 && a[1] == "dialog")   g_syncDialog = a[2] == "1";
     if (a.size() > 2 && a[1] == "xp")       g_syncXP = a[2] == "1";
+    if (a.size() > 2 && a[1] == "rewards")  g_syncRewards = a[2] == "1";
+    if (a.size() > 2 && a[1] == "items") { g_logItems = a[2] == "1"; hooks::Enable("UInventoryLib::AddItemToRespectiveInventory", g_logItems); }
+    // grant <xp> <credits> <standing> [missionType=2] [factionGroup=1]: run a real mission payout through
+    // the game's own function, so the host hook and the client replay are exercised end to end. Safe with
+    // a None task name -- AddNonItemRewards null-checks the FindTaskInPlayerData result before its decal
+    // path (`test rax,rax / je`).
+    if (a.size() > 4 && a[1] == "grant") {
+        uint8_t rewards[32] = {};
+        *(int*)(rewards + 0x00) = atoi(a[2].c_str());
+        *(int*)(rewards + 0x04) = atoi(a[3].c_str());
+        *(int*)(rewards + 0x0C) = atoi(a[4].c_str());
+        uint8_t mt = a.size() > 5 ? (uint8_t)atoi(a[5].c_str()) : 2;
+        uint8_t fg = a.size() > 6 ? (uint8_t)atoi(a[6].c_str()) : 1;
+        FName none{};
+        Rva<std::remove_pointer_t<Fn_AddNonItemRewards>>(es2rva::UMissionLib_AddNonItemRewards)(rewards, &mt, &fg, &none);
+        out += "granted\n";
+    }
     if (a.size() > 1 && a[1] == "refresh")  { Rva<std::remove_pointer_t<Fn_RefreshIndicators>>(es2rva::UMapLib_RefreshMissionAndWaypointIndicators)(); out += "indicators refreshed\n"; }
     out += Format("missions=%d dialog=%d xp=%d | sent: tasks=%llu dialog=%llu xp=%llu | applied: tasks=%llu dialog=%llu xp=%.1f\n",
                   (int)g_syncMissions, (int)g_syncDialog, (int)g_syncXP,
                   (unsigned long long)g_taskSent, (unsigned long long)g_dlgSent, (unsigned long long)g_xpSent,
                   (unsigned long long)g_taskApplied, (unsigned long long)g_dlgApplied, g_xpApplied);
+    out += Format("rewards=%d logItems=%d | sent=%llu applied=%llu\n", (int)g_syncRewards, (int)g_logItems,
+                  (unsigned long long)g_rewardSent, (unsigned long long)g_rewardApplied);
+    if (UObject* pd = Rva<std::remove_pointer_t<Fn_GetPlayerData>>(es2rva::UGameplayLib_GetPlayerData)())
+        out += Format("local player: credits=%d level=%d xp=%.0f\n",
+                      UE_FIELD(int, pd, es2off::UPlayerData::Credits),
+                      UE_FIELD(int, pd, es2off::UPlayerData::PlayerLevel),
+                      UE_FIELD(float, pd, es2off::UPlayerData::XP));
     out += Format("cached tasks: %d\n", (int)g_taskCache.size());
     int n = 0;
     for (auto& [key, s] : g_taskCache) {
@@ -372,7 +471,7 @@ static void CmdCutscene(const console::Args&, std::string& out) {
 }
 
 void Register() {
-    console::Register("world", "world [missions 0/1|dialog 0/1|xp 0/1|refresh] - shared world-state sync status", CmdWorld);
+    console::Register("world", "world [missions 0/1|dialog 0/1|xp 0/1|rewards 0/1|grant <xp> <cr> <standing>|items 0/1|refresh] - shared world-state sync status", CmdWorld);
     console::Register("missions", "missions [taskIdFilter] - mission task actors and this machine's PlayerData records", CmdMissions);
     console::Register("cutscene", "cutscene - cutscenes this machine has seen (name + proxy count)", CmdCutscene);
 }
@@ -386,6 +485,11 @@ void OnInit() {
                    (void*)&H_OnMissionCompleted, (void**)&o_OnMissionCompleted);
     hooks::Install("ChangeTrackedMission_Internal", es2rva::ChangeTrackedMission_Internal,
                    (void*)&H_ChangeTrackedMission, (void**)&o_ChangeTrackedMission);
+    hooks::Install("UMissionLib::AddNonItemRewards", es2rva::UMissionLib_AddNonItemRewards,
+                   (void*)&H_AddNonItemRewards, (void**)&o_AddNonItemRewards);
+    hooks::Install("UInventoryLib::AddItemToRespectiveInventory", es2rva::UInventoryLib_AddItemToRespectiveInventory,
+                   (void*)&H_AddItemToInventory, (void**)&o_AddItemToInventory);
+    hooks::Enable("UInventoryLib::AddItemToRespectiveInventory", false);    // observability, off by default
     hooks::Install("UCutsceneSubSystem::LoadCutscene", es2rva::UCutsceneSubSystem_LoadCutscene,
                    (void*)&H_LoadCutscene, (void**)&o_LoadCutscene);
     hooks::Install("UCutsceneSubSystem::NotifyPlayCutscene", es2rva::UCutsceneSubSystem_NotifyPlayCutscene,

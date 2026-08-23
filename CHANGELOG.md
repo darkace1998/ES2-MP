@@ -25,6 +25,9 @@ it is regenerated and rebuilt.
 - **An invited friend joins from the title screen**, with no save to load first.
 
 ### Added
+- **Mission rewards now reach the client.** Only the host runs mission logic, so a client used to finish
+  a mission and be paid nothing. XP, credits and job score are mirrored and applied to each player's own
+  save. Mission *item* rewards are not covered yet.
 - `objtop`, `uiwatch` and `tools/dump_stackscan.py` for diagnosing object leaks and minidumps.
 
 ## [0.1.1] - 2026-08-22

@@ -446,6 +446,9 @@ namespace es2off {
     constexpr uint32_t TrackedMainMission = 0x160C; // FName (size 8) from UPlayerData
     constexpr uint32_t TrackedSideMission = 0x1614; // FName (size 8) from UPlayerData
     constexpr uint32_t TrackedJob = 0x161C; // FName (size 8) from UPlayerData
+    constexpr uint32_t Credits = 0x120; // int (size 4) from UPlayerData
+    constexpr uint32_t PlayerLevel = 0x128; // int (size 4) from UPlayerData
+    constexpr uint32_t XP = 0x12C; // float (size 4) from UPlayerData
   }
   namespace FTaskSaveGameData {
     constexpr uint32_t __size = 320;

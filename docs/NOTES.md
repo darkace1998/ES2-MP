@@ -692,3 +692,54 @@ it. It cannot tell a leak from churn. Two new instruments:
   into the exe or the mod. It is a scan, not an unwind, so stale frames show too — but it is what turned
   "one ntdll frame" into the two stacks above. Note the `MINIDUMP_THREAD` layout: `Teb` sits at +16 and
   the stack descriptor at +24; reading the former as the latter yields an empty range.
+
+## Mission rewards reach the client (2026-08-24)
+
+Only the host runs mission logic, so only the host ever reached `UMissionLib::AddNonItemRewards` — a
+client finished a mission alongside the host and was paid nothing. The host now mirrors the payout and
+each machine applies it to its **own** `UPlayerData`, which is what keeps the separate saves consistent.
+
+The grant set was taken from the disassembly at `0x5E71518`, not from `docs/research/05`, which is wrong
+about it (docs/research/09 caught the faction-standing claim; the int-vs-float below is a further
+correction):
+
+| field | offset | what it actually does |
+|---|---|---|
+| `XP` | +0x00 | **int32**, `cvtdq2ps` → `AddXP`. Reading it as a float hands `AddXP` a denormal and pays nothing. |
+| `Credits` | +0x04 | int32 → `ChangeCredits(credits, *MissionType == Job(2) ? JobReward(5) : Undefined(0), true, false)` |
+| `OkkarCredits` | +0x08 | read by nothing here |
+| `Standing` | +0x0C | int32 → `IncJobScore`, only when `*FactionGroup != 0` |
+
+Faction standing is never touched by this function. ABI: RCX = `const FMissionRewards*` by hidden
+pointer, RDX/R8 = pointers to single enum bytes, R9 = `const FName*`.
+
+The client replays the three primitives rather than calling `AddNonItemRewards` itself, so it never
+depends on having the mission's task record — the real function looks one up for its decal unlocks
+(and null-checks it: `test rax,rax / je`, which is also what makes `world grant` safe to call with a
+`None` name).
+
+Verified end to end: `world grant 500 1000 5` on the host moved **both** players by exactly +1000 credits
+and +500 XP, with host `sent=1 applied=0` and client `sent=0 applied=1` (no echo). `verify.py` now has a
+`mission rewards reach the client` check, so this cannot rot silently — 24/24.
+
+### Mission ITEM rewards: what the design actually hinges on
+
+There is **no native funnel that grants them**. `AddNonItemRewards` deliberately skips items (hence the
+name), and the payout is Blueprint-driven at a station's claim UI (`SetMissionRewardsPending` /
+`SetMissionRewardsClaimed` operate on the task record and on register-id 0xE level actors). Two facts
+decide the design and only a real mission completion can settle which applies:
+
+- `FTaskSaveGameData` carries the whole `FMissionRewards` — `Items` (`TArray<FItemContainerContent>` at
+  +0x10) included — at +0xD8, and `world_state` already mirrors that record, so a client may already know
+  what it is owed.
+- With solo docking each player visits the station in their own session, so each could simply claim their
+  own copy locally and no item would ever need to cross the wire.
+
+If a transfer does turn out to be needed, it must carry the *generated item's state*, not the descriptor:
+ES2 items are procedural, so two machines generating from the same `FItemContainerContent` produce
+different stats. `UItem::CreateItemFromState` (05E98820) plus `UScriptStruct::ExportText` is the same
+pattern `loadout.cpp` already uses for ships. Note `UItem::GetItemState`'s ABI is documented **backwards**
+in research 05 (flagged crash-grade by 09) — re-read it before use.
+
+`world items 1` enables an off-by-default log of every `UInventoryLib::AddItemToRespectiveInventory`
+grant, on whichever machine runs it, so one real mission completion answers the question.

@@ -297,6 +297,24 @@ def main():
     at = con(HOST, 'attribution')
     check('kill attribution armed', 'attribution=1' in at)
 
+    # Mission rewards: only the host runs mission logic, so a client is paid only if the host mirrors the
+    # payout. Grant a real one through the game's own AddNonItemRewards and watch the client's own
+    # UPlayerData follow. Deltas, not absolutes -- both players usually start from the same save.
+    def wallet(port):
+        m = re.search(r'local player: credits=(-?\d+) level=(-?\d+) xp=(-?\d+)', con(port, 'world'))
+        return (int(m.group(1)), int(m.group(3))) if m else None
+    before_h, before_c = wallet(HOST), wallet(CLIENT)
+    if before_h and before_c:
+        con(HOST, 'world grant 500 1000 5')
+        time.sleep(4)
+        after_h, after_c = wallet(HOST), wallet(CLIENT)
+        dh = (after_h[0] - before_h[0], after_h[1] - before_h[1])
+        dc = (after_c[0] - before_c[0], after_c[1] - before_c[1])
+        check('mission rewards reach the client', dc == (1000, 500) and dh == (1000, 500),
+              f'host +{dh[0]} credits/+{dh[1]} xp, client +{dc[0]} credits/+{dc[1]} xp')
+    else:
+        check('mission rewards reach the client', False, 'could not read UPlayerData credits/xp')
+
     mp = con(HOST, 'maxplayers')
     m = re.search(r'MaxPlayers=(\d+)', mp)
     check('host capacity >= 4 players', bool(m and int(m.group(1)) >= 4), mp.strip())
