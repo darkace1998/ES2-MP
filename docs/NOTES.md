@@ -573,3 +573,55 @@ already pressed past the splash is told, in the log, to start or load a game ins
 world's net mode to Client, so `coop::CurrentRole()` reads Client for a moment before bouncing back to
 the splash. The first version of the retry loop took that at face value, logged "joined", cleared the
 pending join and never retried. Success has to mean *client AND in the host's map*, not just the role.
+
+## Solo docking, and the wall behind it (2026-08-23)
+
+Docking in ES2 is a **level transition** into a `Cinematics` map, not an animation, so a docked client
+necessarily leaves the session. Plan B is to let it: each player docks alone, and the client rejoins the
+host on the way out. Implemented in `travel.cpp` (`dockedAway`/`dockedMap`, `travelinfo` shows both).
+
+**One dock cycle works end to end.** Client leaves for `Cinematics` (host keeps playing, `clientConnections=0`),
+comes back out through ES2's own travel, and rejoins by itself — loadout re-applied (`applied=1`),
+transforms flowing, both players `flying=1`.
+
+**The blocker: the host dies on a client's SECOND reconnect.** Reproducible; the fatal is UE's own
+object-array integrity check (`LowLevelFatalError … UObjectArray.cpp:612`) one frame after our
+`PostLogin` hook returns. It is **not** the mod's feature code and **not** slot reuse:
+
+| variable changed | 1st rejoin | 2nd rejoin |
+|---|---|---|
+| default | ok | host crash |
+| `players prune 0` (fresh slot each join, no reuse) | ok | host crash |
+| `respawn/attribution/world/shipdata` all off on the host | ok | host crash |
+
+That leaves core net/coop or ES2 itself, and ES2 is the likelier half: this is a single-player game whose
+GameMode never saw a second login/logout, the same family as the main-menu-join crash and `AESHUD::Tick`
+faulting on a null pawn. Until it is found, repeated docking is not usable — one round trip is.
+
+Do not test the return leg with `exec open <map>`. It bypasses `UGameplayLib::ChangeLocation`, leaves
+player data thinking it is elsewhere, and crashes the client a few seconds later — an earlier note here
+blamed the mod's reconnect for that access violation; it was the test method. Use `goto <map>`, which
+goes through ES2's own travel, and the round trip is clean.
+
+### Three real bugs docking exposed
+
+**The respawn watchdog fought docking.** `IsFlying` treated *anything that is not a ship* as death, so a
+docked player (station maps possess a `DefaultPawn`) was "dead": both players were respawned every 5 s
+for as long as they stayed docked, leaking a `DefaultPawn` per cycle, while `H_Possess` vetoed the pawn
+the station had just given them. Death is specifically ES2's `BP_Pawn_GameOver_C` — nothing else.
+Verified: 35 s in a `DefaultPawn` now yields `respawns=0`.
+
+**The watchdog read a stale pawn.** It used the registry's cached `pl->pawn`, which is null for a moment
+while a joining client's pawn is substituted, so every join logged "stopped flying (pawn=null)" and fired
+a pointless `RestartPlayer` five seconds in. It was harmless only because `RestartPlayer` refuses to spawn
+when the controller already has a pawn. The controller's own `Pawn` field is always current — ask it.
+
+**A departed client kept its slot.** Slots are freed when the old controller stops being *dereferenceable*,
+but `IsValidObject` deliberately means exactly that and not "pending-kill", so a disconnected client's
+controller held its slot for seconds after it left — long enough that the rejoin was pushed to the next
+slot (observed: player 1 came back as player 2), and enough dock cycles would walk off the end of the
+4-slot registry. `IsGarbage` is the right test for a departed remote player; `players prune 0/1` toggles it.
+
+Also noted while looking: `coop::OnLogout` is declared, defined and **never called** — nothing hooks
+`Logout`. `AGameModeBase::Logout` exists in the PDB but `AESGameModeBase`'s vtable dump does not settle
+whether ES2 overrides it, so it was left alone rather than hooked on a guess.

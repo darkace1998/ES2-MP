@@ -33,6 +33,8 @@ Player* RegisterController(ue::APlayerController* pc);
 // Client side: record our own controller under the id the host assigned us.
 Player* RegisterLocalAs(ue::APlayerController* pc, int id);
 void UnregisterController(ue::APlayerController* pc);
+void SetPruneDeparted(bool on);   // free a remote slot as soon as its controller is pending-kill
+bool PruneDeparted();
 Player* ByController(ue::APlayerController* pc);
 Player* ByPawn(ue::AActor* pawn);
 Player* ById(int id);

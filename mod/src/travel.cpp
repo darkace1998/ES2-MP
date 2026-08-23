@@ -66,6 +66,16 @@ static double g_relistenAt = 0;
 static std::string g_hostAddr;            // client: where to reconnect after the host jumps
 static double g_reconnectAt = 0;
 static int g_reconnectTries = 0;
+// Docking is a LEVEL CHANGE, not an animation: ES2 opens a station/cinematic map. On a client that is a
+// local client-travel, so the player simply drops out of the session for as long as they are docked --
+// the host carries on without them (verified: host stayed in its location, clientConnections went to 0).
+// That is the behaviour we want for co-op ("solo docking"), and all it needs is a way back: remember
+// that we left under our own steam and rejoin once we are out of the station again.
+static bool g_leftSession = false;        // client -> standalone seen; still waiting to see where we land
+static bool g_dockedAway = false;
+static std::string g_dockedMap;           // the station/cinematic map we left into
+static int g_lastNetMode = -1;
+static constexpr double kDockReturnSettle = 10.0;   // let the location finish coming up before connecting
 static double g_reconnectDelay = 18.0;   // the host needs ~15s to load the new location and re-listen
 
 // ---------------------------------------------------------------- world origin shifting
@@ -148,6 +158,53 @@ void Tick(float dt, bool isHost) {
         g_wasHosting = false;
         g_relistenAt = 0;
         return;
+    }
+
+    // ---- solo docking: a client that travelled away on its own finds its way back --------------
+    // Client -> Standalone with no host-announced travel pending means we left the session ourselves,
+    // which in practice means we docked. Remember the map we landed in so we know when we are out of it.
+    // Where we land cannot be read on the frame the net mode drops: a dock travels through
+    // EmptyTransitionMap first, so deciding immediately either misses the station (the edge is already
+    // spent by the time the real map loads) or latches onto the transition map. Latch the edge, then
+    // decide once the world has settled.
+    if (g_lastNetMode == 3 && nm == 0 && !g_hostAddr.empty() && g_reconnectAt == 0 && !g_dockedAway)
+        g_leftSession = true;
+    g_lastNetMode = nm;
+
+    if (g_leftSession) {
+        if (nm == 3) {
+            g_leftSession = false;                      // back in a session on our own
+        } else if (world == "EntryMap" || world == "Map_MainMenu") {
+            // Quit to the front end, or ES2 bounced us there. This is NOT a dock, and it must never
+            // arm a rejoin: travelling to a host from the main menu crashes the game (ES2's own bug,
+            // see docs/INSTALL.md). Observed live — a client that fell back to EntryMap logged
+            // "left the session for 'EntryMap' (docked?)" before this check existed.
+            LOGF("[travel] left the session for the main menu — not rejoining");
+            g_leftSession = false;
+        } else if (inGameplayMap) {
+            g_leftSession = false;
+            g_dockedAway = true;
+            g_dockedMap = world;
+            LOGF("[travel] docked away into '%s' — will rejoin %s on the way out",
+                 world.c_str(), g_hostAddr.c_str());
+        }
+        // otherwise still in transit (EmptyTransitionMap / no world yet): decide on a later tick
+    }
+    if (g_dockedAway) {
+        if (nm == 3) { g_dockedAway = false; g_dockedMap.clear(); }          // already back in
+        else if (nm == 0 && inGameplayMap && world != g_dockedMap) {
+            // Arm the ordinary reconnect path rather than opening right here: that loop already knows how
+            // to wait for the drop, retry and give up, and a few seconds of settle costs nothing on a
+            // level that has just finished streaming in. (An earlier note here blamed an immediate
+            // connect for an access violation; that crash was actually caused by testing the return leg
+            // with a raw `open`, which bypasses UGameplayLib::ChangeLocation — see docs/NOTES.md.)
+            g_dockedAway = false;
+            g_dockedMap.clear();
+            g_reconnectAt = g_now + kDockReturnSettle;
+            g_reconnectTries = 0;
+            LOGF("[travel] out of the station and back in %s — rejoining %s in %.0fs",
+                 world.c_str(), g_hostAddr.c_str(), kDockReturnSettle);
+        }
     }
 
     if (g_reconnectAt > 0) {
@@ -234,6 +291,7 @@ static void CmdTravelInfo(const console::Args& a, std::string& out) {
                   (int)g_coopTravel, g_mode.c_str(), (int)g_disableOriginShift, (unsigned long long)g_redirects, g_lastUrl.c_str());
     out += Format("hostAddr=%s wasHosting=%d reconnectIn=%.1fs\n", g_hostAddr.c_str(), (int)g_wasHosting,
                   g_reconnectAt > 0 ? g_reconnectAt - g_now : 0.0);
+    out += Format("leftSession=%d dockedAway=%d dockedMap=%s\n", (int)g_leftSession, (int)g_dockedAway, g_dockedMap.empty() ? "-" : g_dockedMap.c_str());
     if (gi) out += Format("worldOriginShiftingStack=%d bUseWorldOriginShifting=%d\n",
                           UE_FIELD(int32_t, gi, es2off::UESGameInstance::WorldOriginShiftingStack),
                           (int)UE_FIELD(bool, gi, es2off::UESGameInstance::bUseWorldOriginShifting));

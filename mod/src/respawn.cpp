@@ -45,11 +45,24 @@ static uint64_t g_respawns = 0;
 struct DeathState { double deadSince = 0; bool pending = false; };
 static std::map<int, DeathState> g_state;
 
+// ES2 hands the controller a BP_Pawn_GameOver_C when the run ends. That — not "anything that is not a
+// ship" — is what death looks like.
+static bool IsGameOverPawn(AActor* pawn) {
+    return ue::GetObjectClassName((UObject*)pawn).find("GameOver") != std::string::npos;
+}
+
 // A player counts as "flying" when their pawn is an ESPawn with hull left.
+//
+// Anything else that is NOT the game-over pawn is some other legitimate state — above all DOCKING,
+// which travels to a station/cinematic map and possesses a DefaultPawn. Treating that as death made
+// this watchdog respawn every player every 5 s for as long as they stayed docked, leaking a fresh
+// DefaultPawn per cycle (observed: player 0 and player 1 looping in Cinematics). Only a missing pawn or
+// the game-over pawn should bring us in.
 static bool IsFlying(AActor* pawn) {
     if (!pawn || !IsValidObject((UObject*)pawn)) return false;
+    if (IsGameOverPawn(pawn)) return false;
     UClass* esPawn = FindClass("/Script/ES2.ESPawn");
-    if (!esPawn || !IsA((UObject*)pawn, esPawn)) return false;      // BP_Pawn_GameOver_C etc.
+    if (!esPawn || !IsA((UObject*)pawn, esPawn)) return true;       // docked / cinematic: not our business
     // hull ratio, if the pawn has a health component
     UClass* hc = FindClass("HealthComponent");
     if (hc) {
@@ -63,15 +76,18 @@ static bool IsFlying(AActor* pawn) {
     return true;
 }
 
-// Hard veto: never let a co-op player's controller possess anything that is not a ship. That is what
-// puts the player into BP_Pawn_GameOver_C and starts the single-player game-over flow.
+// Hard veto: never let a co-op player's controller be put into the GAME-OVER pawn, which is what starts
+// the single-player game-over flow.
+//
+// This used to veto anything that was not a ship, which also caught the DefaultPawn a station or
+// cinematic map possesses — i.e. it fought docking, and combined with the respawn watchdog above it
+// produced an endless possess/veto/respawn loop.
 static void H_Possess(void* controller, AActor* pawn) {
     if (g_enabled && g_vetoGameOverPawn && coop::CurrentRole() == coop::Role::Host && controller && pawn) {
         players::Player* pl = players::ByController((APlayerController*)controller);
-        UClass* esPawn = FindClass("/Script/ES2.ESPawn");
-        if (pl && esPawn && !IsA((UObject*)pawn, esPawn)) {
+        if (pl && IsGameOverPawn(pawn)) {
             ++g_vetoed;
-            LOGF("[respawn] vetoed possession of %s by player %d (not a ship) — respawning instead",
+            LOGF("[respawn] vetoed the game-over pawn %s for player %d — respawning instead",
                  GetName((UObject*)pawn).c_str(), pl->id);
             g_state[pl->id].deadSince = g_now;
             g_state[pl->id].pending = true;
@@ -118,6 +134,16 @@ static void RestoreHitpoints(AActor* pawn) {
     }
 }
 
+// The registry's cached pawn lags behind a possess and is null for a moment while a joining client's
+// pawn is being substituted — which made this watchdog announce "player N stopped flying (pawn=null)"
+// and fire a pointless RestartPlayer five seconds into every join. The controller's own Pawn field is
+// always current; the cache is only a fallback for a player whose controller has gone away.
+static AActor* LivePawn(players::Player* pl) {
+    if (pl->pc && IsValidObject((UObject*)pl->pc))
+        return UE_FIELD(AActor*, pl->pc, es2off::AController::Pawn);
+    return pl->pawn;
+}
+
 static void DoRespawn(players::Player* pl) {
     UWorld* w = GetWorld();
     AGameModeBase* gm = GetGameMode(w);
@@ -146,12 +172,13 @@ void Tick(float dt, bool isHost) {
     if (!g_enabled || !isHost) return;
     for (auto* pl : players::All()) {
         DeathState& st = g_state[pl->id];
-        if (IsFlying(pl->pawn)) { st.deadSince = 0; st.pending = false; continue; }
+        AActor* pawn = LivePawn(pl);
+        if (IsFlying(pawn)) { st.deadSince = 0; st.pending = false; continue; }
         if (st.deadSince == 0) {
             st.deadSince = g_now;
             st.pending = true;
             LOGF("[respawn] player %d stopped flying (pawn=%s); respawning in %.0fs",
-                 pl->id, GetName((UObject*)pl->pawn).c_str(), g_delay);
+                 pl->id, GetName((UObject*)pawn).c_str(), g_delay);
             continue;
         }
         if (st.pending && g_now - st.deadSince >= g_delay) {
@@ -182,7 +209,7 @@ static void CmdRespawn(const console::Args& a, std::string& out) {
                   (int)g_vetoGameOverPawn, (unsigned long long)g_vetoed,
                   (int)g_blockSessionExits, (unsigned long long)g_blockedExits);
     for (auto* pl : players::All())
-        out += Format("  p%d %-22s flying=%d\n", pl->id, GetName((UObject*)pl->pawn).c_str(), (int)IsFlying(pl->pawn));
+        out += Format("  p%d %-22s flying=%d\n", pl->id, GetName((UObject*)LivePawn(pl)).c_str(), (int)IsFlying(LivePawn(pl)));
 }
 
 void Register() {

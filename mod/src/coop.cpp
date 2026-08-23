@@ -453,7 +453,11 @@ static void CmdCoop(const console::Args& a, std::string& out) {
                                    (int)GetReplicateMovement(p->pawn), (int)p->hasTarget, (unsigned long long)p->rxPackets);
 }
 
-static void CmdPlayers(const console::Args&, std::string& out) { out += players::Describe(); }
+static void CmdPlayers(const console::Args& a, std::string& out) {
+    if (a.size() > 2 && a[1] == "prune") players::SetPruneDeparted(a[2] == "1");
+    out += players::Describe();
+    out += Format("pruneDeparted=%d\n", (int)players::PruneDeparted());
+}
 
 // push <vx> <vy> <vz> : give the local ship a velocity. Used to verify the owning client keeps control
 // of its own movement (no server correction / rubberbanding).
@@ -498,7 +502,7 @@ static void CmdTp(const console::Args& a, std::string& out) {
 
 void Register() {
     console::Register("coop", "coop [hz N|verbose 0/1|smooth R|rotrate R|snap D|sweep|say <text>|nopause] - co-op core", CmdCoop);
-    console::Register("players", "list the player registry (id, controller, pawn, position)", CmdPlayers);
+    console::Register("players", "players [prune 0/1] - list the player registry (id, controller, pawn, position)", CmdPlayers);
     console::Register("push", "push <vx> <vy> <vz> - set the local ship's velocity (rubberband test)", CmdPush);
     console::Register("where", "local pawn position and velocity", CmdWhere);
     console::Register("tp", "tp <x> <y> <z> | tp <playerId> - teleport the local pawn", CmdTp);

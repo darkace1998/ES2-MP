@@ -9,6 +9,7 @@ using es2coop::Format;
 namespace players {
 
 static std::array<Player, kMaxPlayers> g_slots{};
+static bool g_prune = true;
 static int g_localId = 0;
 static std::mutex g_mutex;
 
@@ -91,6 +92,9 @@ Player* RegisterLocalAs(APlayerController* pc, int id) {
     return &p;
 }
 
+void SetPruneDeparted(bool on) { g_prune = on; }
+bool PruneDeparted() { return g_prune; }
+
 void UnregisterController(APlayerController* pc) {
     std::lock_guard<std::mutex> lk(g_mutex);
     for (auto& p : g_slots) if (p.alive && p.pc == pc) {
@@ -103,6 +107,15 @@ void Refresh() {
     for (auto& p : g_slots) {
         if (!p.alive) continue;
         if (!IsValidObject((UObject*)p.pc)) { LOGF("[players] id=%d controller went away", p.id); p = Player{}; continue; }
+        // A disconnected client's controller stays readable until the next GC, so IsValidObject (which
+        // deliberately means "dereferenceable", not "not pending-kill") keeps its slot alive for seconds
+        // after it left. That matters because ES2 players disconnect and rejoin constantly under solo
+        // docking: a rejoin landing while the corpse still held slot 1 was pushed to slot 2, and enough
+        // cycles would walk off the end of the 4-slot registry. Pending-kill is the right test here.
+        if (!p.local && g_prune && IsGarbage((UObject*)p.pc)) {
+            LOGF("[players] id=%d disconnected (controller pending-kill) — freeing the slot", p.id);
+            p = Player{}; continue;
+        }
         p.pawn = UE_FIELD(AActor*, p.pc, es2off::AController::Pawn);
         if (p.pawn && !IsValidObject((UObject*)p.pawn)) p.pawn = nullptr;
     }
