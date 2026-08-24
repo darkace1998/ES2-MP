@@ -254,7 +254,7 @@ Check it:  `python3 scripts/verify.py --travel`   → **21/21 checks pass** (19 
   then refused to ever retry after that first poisoned attempt. The real guard is `want == GetLock(wc)`,
   which costs one comparison once the lock is in place. SetLockedTarget does restart the missile lock, so
   carry `RemainingMissileLockTime` across the call.
-- **XP not yet observed firing.** The path is implemented and armed, but the harness cannot reliably make a parked ship land a kill, so no live award has been measured.
+- **XP-on-kill is verified** (2026-08-24): a client's kill pays the client and not the host, checked by `verify.py`. Real kills award nothing in the test save for reasons that are ES2's design, not a bug — see the section below.
 - **Docking, stations, and mission *item* rewards** are not mirrored; `UMissionLib::AddNonItemRewards` is mapped (XP + credits + job score — it does *not* grant faction standing) but not yet hooked.
 - **Mission records that only one side has.** The client applies deltas to existing `FTaskSaveGameData` records; creating one from scratch (320 bytes with TArray/TMap members) is deliberately not attempted.
 
@@ -777,3 +777,36 @@ finish before that anyway: the player is not in the world yet. Proving this was 
 
 So the mod's own contribution is now 0.31 + 0.35 + 0.41 ≈ **1.07 s**, down from ~4.3 s. Chasing the total
 below ~7 s means making ES2 load faster, which is not this mod's business.
+
+
+## XP-on-kill, finally observed (2026-08-24)
+
+It was never firing because **every real kill in the test save legitimately awards zero XP** — three
+independent gates, none of them a mod bug:
+
+1. **Level delta.** The award scales XP by the player-level-vs-pawn-level delta and *zeroes* it outright
+   at a delta of 4 or more (`and dword ptr [rbx+0xa0], 0x0`). The save is player level 16 parked in a
+   starter zone full of level-1 enemies.
+2. **The NPCs are worth nothing.** `XPComponent::XP` (+0xA0) reads `0` on the mission ships and turrets
+   in S01L01, and their `NPCLevelingData` says `XP=0` too.
+3. **Damage share.** `NeededPlayerDamageRatio` (+0xA8) is 0.2 — a player must have done 20% of the
+   damage, which a parked harness ship never does.
+
+So "the harness cannot reliably make a parked ship land a kill" was only half the story: even a
+successful kill would have paid nothing, which is why this sat unverified for so long.
+
+**How it is verified now.** `UXPComponent::OwnerHealthDepleted` is a reflected delegate (3 params:
+Owner, DamageCauser, DamageInstigator), so the harness neutralises exactly those three gates — sets the
+component's `XP` to 250, its `NeededPlayerDamageRatio` to 0, and the NPC's `NPCLevel` to the player's —
+and then drives the game's own award function. Everything co-op about the path stays real: the
+acting-player scope, the `AddXP` redirect, and the client applying the award to its own save.
+
+Measured both directions:
+
+| instigator | host XP | client XP | attribution |
+|---|---|---|---|
+| host's controller | **+250** | — | `XP kept local=1`, 4 identity shims |
+| client's controller | **+0** | **+250** | `XP redirected=1 (250.0)` |
+
+`verify.py` now carries `a client's kill pays the client, not the host`, degrading to INFO where the
+location has no NPC with an XP component.

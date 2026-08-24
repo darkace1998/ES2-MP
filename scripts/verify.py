@@ -315,6 +315,43 @@ def main():
     else:
         check('mission rewards reach the client', False, 'could not read UPlayerData credits/xp')
 
+    # XP attribution: a kill the CLIENT earned must pay the client, not the host. Real kills cannot show
+    # this in the test save -- ES2 zeroes the award when the killer is 4+ levels above the target (16 vs 1
+    # here), these mission NPCs carry XP=0 anyway, and 20% damage share is required -- so drive the game's
+    # own award delegate directly with those three gates neutralised. Everything co-op about the path is
+    # still real: the acting-player scope, the AddXP redirect, and the client applying it to its own save.
+    def xp_of(port):
+        m = re.search(r'local player: credits=-?\d+ level=(-?\d+) xp=(-?\d+)', con(port, 'world'))
+        return (int(m.group(1)), int(m.group(2))) if m else None
+    npc = xpc = cpawn = cpc = None
+    for line in con(HOST, 'actors ESPawn 16').splitlines():
+        m = re.match(r'([0-9A-F]{16}) (\S+)', line.strip())
+        if not m: continue
+        if 'Ship_Player' in m.group(2):
+            if 'role=3/2' in line: cpawn = '0x' + m.group(1)
+        elif npc is None:
+            npc = '0x' + m.group(1)
+    for line in con(HOST, 'actors PlayerController 6').splitlines():
+        m = re.match(r'([0-9A-F]{16}) ', line.strip())
+        if m and 'role=3/2' in line: cpc = '0x' + m.group(1)
+    if npc:
+        m = re.search(r'0x03B8 XP\s+ObjectProperty.*?([0-9A-F]{16})\s*$', con(HOST, f'props {npc}'), re.M)
+        if m: xpc = '0x' + m.group(1)
+    lvl = xp_of(HOST)
+    if npc and xpc and cpawn and cpc and lvl:
+        con(HOST, f'set {xpc} XP 250')
+        con(HOST, f'set {xpc} NeededPlayerDamageRatio 0')
+        con(HOST, f'set {npc} NPCLevel {lvl[0]}')
+        h0, c0 = xp_of(HOST), xp_of(CLIENT)
+        con(HOST, f'call {xpc} OwnerHealthDepleted {npc} {cpawn} {cpc}')
+        time.sleep(4)
+        h1, c1 = xp_of(HOST), xp_of(CLIENT)
+        dh, dc = h1[1] - h0[1], c1[1] - c0[1]
+        check("a client's kill pays the client, not the host", dc == 250 and dh == 0,
+              f'client +{dc} xp, host +{dh} xp')
+    else:
+        print('INFO  XP attribution: no NPC with an XP component in this location — not exercised')
+
     mp = con(HOST, 'maxplayers')
     m = re.search(r'MaxPlayers=(\d+)', mp)
     check('host capacity >= 4 players', bool(m and int(m.group(1)) >= 4), mp.strip())

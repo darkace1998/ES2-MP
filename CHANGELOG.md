@@ -7,6 +7,18 @@ Every release is pinned to one game build: the mod compares the game exe's PE ti
 baked into its SDK headers and disables itself if they differ, so after a game patch it stays inert until
 it is regenerated and rebuilt.
 
+## [Unreleased]
+
+### Fixed
+- Nothing yet.
+
+### Verified
+- **XP from a client's kill goes to the client, not the host.** The path shipped in an earlier release
+  but had never been seen firing, because every kill in the test save awards zero XP by ES2's own design
+  (a 4+ player-level delta zeroes the award, the local NPCs carry XP=0, and 20% damage share is
+  required). The harness now drives the award directly with those gates neutralised and checks both
+  directions.
+
 ## [0.2.0] - 2026-08-24
 
 ### Added
