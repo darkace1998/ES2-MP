@@ -10,6 +10,9 @@ it is regenerated and rebuilt.
 ## [Unreleased]
 
 ### Fixed
+- `shipdata repairjoin 1` on the host hands joining players a repaired hull, for sessions whose saves are
+  parked at near-zero hull. Off by default, since it otherwise erases real damage.
+- `shipdata rate N` and `shipdata repairjoin` were declared but unreachable — both are wired up now.
 - **A joining client inherited the host's hull condition.** The loadout substitution replaced a joiner's
   ship items but not its condition, so its bars read whatever the host's saved ship was — zero if the
   host's ship was wrecked — and the first thing that corrected them was dying, since respawn restores to

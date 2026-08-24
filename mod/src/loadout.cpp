@@ -98,6 +98,10 @@ static std::map<int, bool> g_applied;
 // The client's own hull/armour condition, parsed out of its blob (see ApplyClientCondition).
 struct Condition { float health = -1.f, armor = -1.f; };
 static std::map<int, Condition> g_condition;
+// Off by default: a joiner arrives in the condition its OWN save says, damage included. Turn it on
+// (`shipdata repairjoin 1` on the host) to hand every joining player a repaired hull instead -- useful
+// when the saves involved are parked at near-zero hull and a session would start one hit from death.
+static bool g_repairOnJoin = false;
 static double g_hostNow = 0;
 
 // ---------------------------------------------------------------- export / import
@@ -719,7 +723,8 @@ void HostTick(float dt) {
             }
             // Their ship, their condition -- not the host's. Through ES2's own setter so the bars and
             // delegates follow (a raw field write leaves the HUD stale).
-            const Condition& c = g_condition[id];
+            Condition c = g_condition[id];
+            if (g_repairOnJoin) { c.health = 1.f; c.armor = 1.f; }
             for (auto& [cls, ratio] : {std::pair<const char*, float>{"HealthComponent", c.health},
                                        std::pair<const char*, float>{"ArmorComponent", c.armor}}) {
                 if (ratio < 0.f) continue;
@@ -812,6 +817,7 @@ static void CmdShipData(const console::Args& a, std::string& out) {
                       (unsigned long long)g_prePostInit,
                       (unsigned long long)g_preBeginPlay, (int)LocalShipIsEmpty(pawn));
     } else if (sub == "stash") {
+        out += Format("  repairOnJoin=%d\n", (int)g_repairOnJoin);
         for (auto& [id, s] : g_stash)
             out += Format("  player %d: %zu chars applied=%d hull=%.3f armor=%.3f\n", id, s.size(),
                           (int)g_applied[id], g_condition[id].health, g_condition[id].armor);
@@ -920,14 +926,20 @@ static void CmdShipData(const console::Args& a, std::string& out) {
         out += Format("  ShipItemInstance: %s | Inventory: %s\n",
                       shipItem && IsValidObject(shipItem) ? UE_FIELD(FName, shipItem, es2off::UItem::ItemTemplateID).ToString().c_str() : "NULL",
                       inv && IsValidObject(inv) ? GetName(inv).c_str() : "NULL");
+    } else if (sub == "repairjoin") {
+        if (a.size() > 2) g_repairOnJoin = a[2] == "1";
+        out += Format("repairOnJoin=%d\n", (int)g_repairOnJoin);
+    } else if (sub == "rate") {
+        if (a.size() > 2 && atoi(a[2].c_str()) > 0) g_chunksPerTick = atoi(a[2].c_str());
+        out += Format("chunksPerTick=%d\n", g_chunksPerTick);
     } else if (sub == "on")  { g_enabled = true;  out += "loadout substitution ON\n"; }
     else if (sub == "off") { g_enabled = false; out += "loadout substitution OFF\n"; }
-    else out += "usage: shipdata [info|export|send|stash|apply <id>|weapons|devices|local|tweak <a> <b>|on|off]\n";
+    else out += "usage: shipdata [info|export|send|stash|apply <id>|weapons|devices|local|tweak <a> <b>|repairjoin 0/1|rate N|on|off]\n";
 }
 
 void Register() {
     console::Register("reticle", "reticle - why the client's reticle is or is not updating", CmdReticle);
-    console::Register("shipdata", "shipdata [info|export|send|stash|apply <id>|weapons|devices|local|on|off] - per-player ship loadout", CmdShipData);
+    console::Register("shipdata", "shipdata [info|export|send|stash|apply <id>|weapons|devices|local|repairjoin 0/1|rate N|on|off] - per-player ship loadout", CmdShipData);
     console::Register("ships", "ships [index] - list the ships this player owns / pick the one to fly", CmdShips);
 }
 

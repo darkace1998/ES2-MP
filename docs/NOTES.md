@@ -882,6 +882,26 @@ them to the pawn it spawns for that player, through `SetCurrentHitpointsWithRati
 delegates follow. `shipdata stash` shows the parsed values, and `verify.py` compares what the client sent
 against what its ship actually has on the host (27/27).
 
+**Proving the first-join path needed a distinguishable value.** In this save the client's own condition
+(0.010) is identical to what the bug produced (the host's 0.010), so a first join cannot tell the two
+apart — the initial "verified" reading was inconclusive, and only the forced re-apply proved anything.
+Re-run properly with `shipdata tweak Health=0.010000 Health=1.000000` set on the client *before* it
+connects: the joiner then comes up at 1.000 where it used to come up 0.010.
+
+**The joiner can still look wrecked, and be correct.** The condition now transferred is the client's own,
+so a save parked at 1% hull produces a 1% hull joiner. `shipdata repairjoin 1` on the host overrides that
+and hands every joining player a repaired hull (off by default — it otherwise erases real damage).
+
 **Careful reading the harness save:** its ship is genuinely at 1% hull. Plain single player, no co-op
 involved, reads `HitpointRatio = 0.01` with full shields — so "both ships show 0.01" in a test session is
 the save, not a bug. That cost a detour before the provenance test separated the two.
+
+
+### Two console switches were never wired (2026-08-24)
+
+`shipdata rate N` (chunk pacing) and the first cut of `shipdata repairjoin` were both added as
+`if (a[1] == "...")` statements while `CmdShipData` dispatches on an if/else-if chain over `sub` — the
+edits matched nothing and were silently dropped. The pacing itself was live (8 chunks/tick, which is what
+the join-latency measurement recorded); only its tunability was missing, despite being named in a commit
+message and in this file. Both are wired into the chain now. Worth remembering: a switch that is declared
+but never reachable reads exactly like a working one in the source.
