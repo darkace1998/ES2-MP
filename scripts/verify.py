@@ -389,6 +389,23 @@ def main():
     else:
         print('INFO  ship condition: no stashed loadout to compare — not exercised')
 
+    # A second player's pawn resets the FIRST one's movement stats to the class default -- ES2 treats
+    # "the player's ship" as a singleton. Whoever loses the race flies a ship that reverses, strafes and
+    # hovers at ~59% speed, which reads as "the other player is permanently cruising". Both players fly
+    # the same ship in this save, so their values must agree.
+    def ship_speed(port):
+        m = re.search(r'0x0378 ShipMovement\s+ObjectProperty\s+=.*?([0-9A-F]{16})\s*$',
+                      con(port, 'props pawn'), re.M)
+        if not m: return None
+        mm = re.search(r'MaxSpeedBackward.*?BaseValue=(\d+)', con(port, f'props 0x{m.group(1)}'))
+        return int(mm.group(1)) if mm else None
+    hs, cs = ship_speed(HOST), ship_speed(CLIENT)
+    if hs and cs:
+        check('a second player does not slow the first ship', hs == cs,
+              f'host MaxSpeedBackward={hs}, client={cs}')
+    else:
+        print('INFO  ship speed: could not read the movement component — not exercised')
+
     mp = con(HOST, 'maxplayers')
     m = re.search(r'MaxPlayers=(\d+)', mp)
     check('host capacity >= 4 players', bool(m and int(m.group(1)) >= 4), mp.strip())

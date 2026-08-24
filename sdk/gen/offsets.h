@@ -416,6 +416,7 @@ namespace es2off {
     constexpr uint32_t bGetShipModulesFromShipData = 0x8B8; // bool (size 1) from AESPawn
     constexpr uint32_t bGetShipColorsFromShipData = 0x9D8; // bool (size 1) from AESPawn
     constexpr uint32_t bGetDecalsFromShipData = 0xA78; // bool (size 1) from AESPawn
+    constexpr uint32_t ShipMovement = 0x378; // UShipMovementComponent * (size 8) from AESPawn
   }
   namespace AESPlayerController {
     constexpr uint32_t __size = 3120;
@@ -436,6 +437,14 @@ namespace es2off {
     constexpr uint32_t bSteamworksClientInitialized = 0xD8; // bool (size 1) from FOnlineSubsystemSteam
     constexpr uint32_t SessionInterface = 0xF8; // TSharedPtr<FOnlineSessionSteam,1> (size 16) from FOnlineSubsystemSteam
     constexpr uint32_t IdentityInterface = 0x108; // TSharedPtr<FOnlineIdentitySteam,1> (size 16) from FOnlineSubsystemSteam
+  }
+  namespace UShipMovementComponent {
+    constexpr uint32_t __size = 2848;
+  }
+  namespace FBuffableFloat {
+    constexpr uint32_t __size = 64;
+    constexpr uint32_t BaseValue = 0x0; // float (size 4) from FBuffableFloat
+    constexpr uint32_t CurrentValue = 0x30; // float (size 4) from FBuffableFloat
   }
   namespace UPlayerData {
     constexpr uint32_t __size = 8624;
@@ -587,8 +596,5 @@ namespace es2off {
     constexpr uint32_t Inventory = 0x10; // UInventory * (size 8) from FShipData
     constexpr uint32_t ShipItemInstance = 0x18; // UItem * (size 8) from FShipData
     constexpr uint32_t UltimateDevice = 0x20; // UItem * (size 8) from FShipData
-  }
-  namespace UShipMovementComponent {
-    constexpr uint32_t __size = 2848;
   }
 }

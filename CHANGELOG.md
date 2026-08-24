@@ -10,6 +10,10 @@ it is regenerated and rebuilt.
 ## [Unreleased]
 
 ### Fixed
+- **A second player made the first one's ship slow.** ES2 treats the player ship as a singleton, so
+  whichever pawn initialised second took its movement stats and left the other at the class default —
+  reversing, strafing and hovering at ~59% speed while forward flight stayed normal, which reads as the
+  *other* player permanently cruising. Both machines now hold their own ship's values.
 - **A client could not mine ore or crystals — it could not even see them.** Resource nodes are spawned at
   runtime by the location generator, and UE does not run gameplay spawns on a client, so a client's sky
   was simply empty of ore (measured: host 4 / client 0 in one location). The host now shares them, after

@@ -1044,3 +1044,36 @@ actor it shares — worth reading after any change here, since the class list is
 Cruise state itself is not inspectable from the console: it lives on `AESPlayerController` as delegates
 and private members with no reflected properties, so `props pc` shows nothing. Diagnosing a flight-mode
 report means bisecting switches, not reading state.
+
+## "The other player is permanently cruising" — a second pawn steals the ship's stats (2026-08-25)
+
+Reported as the client flying in cruise mode while the game said it was not. The client was fine; the
+**host** was slow. ES2 treats "the player's ship" as a singleton, so when a second player pawn
+initialises it takes the ship's movement stats and leaves the first pawn at the class default:
+
+```
+MaxSpeedBackward / MaxSpeedStrafe / MaxSpeedHover:  7650  ->  4500   (Sentinel)
+```
+
+`MaxSpeedForward` is item-driven (`AttributeID=cruise_speed`) and survives, which is why the degraded ship
+still flies forward at roughly the right speed while reversing, strafing and hovering are all wrong — and
+why the healthy player looks like they are cruising.
+
+Established by measurement, not inference:
+
+- single player, same save, no co-op: **7650** — the ground truth;
+- hosting alone, listen server up, no client: **7650**, pawn unchanged;
+- the moment a client joins: host **4500**, client 7650, **and the host's pawn was never respawned** —
+  its inventory and weapons are intact, so ES2 recomputed the values rather than rebuilding the ship;
+- with `shipdata off`: still 4500, so the loadout substitution is not involved;
+- after fixing only the host: host 7650 and the **client** went to 4500 — the same theft, mirrored, since
+  on the client machine it is the host's remote pawn that initialises second.
+
+It is not something the mod can prevent at the source, so both machines guard their own local pawn: keep
+the highest `BaseValue` seen for the current pawn and put it back when it drops. Real buffs and debuffs
+go through the `Modifiers` array beside `BaseValue`, so guarding `BaseValue` does not fight them, and a
+refit or respawn is a different pawn, which re-baselines. `shipdata stash` shows the baseline and a
+restore count; `verify.py` asserts both players report the same speed (30/30).
+
+**Snapshotting at `PostLogin` is too late** — the values are already 4500 by then, so the reset happens
+earlier in the join than any hook the mod has. Hence the rolling baseline rather than a before/after pair.

@@ -318,6 +318,7 @@ static void H_PushPause() { if (g_role != Role::None) { static int n = 0; if (n+
 static void H_PopPause() { if (g_role != Role::None) return; o_PopPause(); }
 
 // ---------------------------------------------------------------- tick
+static double g_speedTickAccum = 0;
 static bool g_helloSent = false;
 static bool g_sawLocalPC = false;
 static int  g_helloTries = 0;
@@ -437,6 +438,8 @@ static void Tick(float dt) {
         if (g_welcomed) { loadout::MaybeSendOnJoin(); loadout::ClientTick(dt); }
         combat::ClientAimTick(dt);
         loadout::ClientLocalShipTick();
+        g_speedTickAccum += dt;
+        if (g_speedTickAccum >= 1.0) { g_speedTickAccum = 0; loadout::LocalShipSpeedTick(); }
         loadout::ClientBuildWeaponsTick();
         world_state::Tick(dt, false);
     }

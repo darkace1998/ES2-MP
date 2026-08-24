@@ -223,6 +223,89 @@ static float ParseRatio(const std::string& text, const char* key) {
 // no substitution respawn was armed and the client kept flying the placeholder the host had built from
 // its OWN UPlayerData -- the host's ship model, the host's stats, a near-empty shield. Being destroyed
 // was the only way out, because that respawn spawns through the substitution again.
+// ---------------------------------------------------------------- the host's own speed
+//
+// A client joining resets three of the HOST's own movement stats to the class default: MaxSpeedBackward,
+// MaxSpeedStrafe and MaxSpeedHover drop from the ship's values to 4500 (measured 7650 -> 4500 on a
+// Sentinel). The pawn is NOT respawned and its inventory is intact, so ES2 recomputes them from a default
+// rather than from the ship -- a single-player assumption about there being exactly one player pawn.
+// MaxSpeedForward is item-driven and survives, which is why the host still flies forward at roughly the
+// right speed while reversing, strafing and hovering are all wrong -- and why the OTHER player looks like
+// they are permanently in cruise: they are simply at the correct speed.
+//
+// It is not the loadout substitution (it happens with `shipdata off` too) and not a respawn, so there is
+// nothing to fix at the source from here: snapshot the local player's values when a joiner logs in and
+// put them back once the join has settled.
+static const char* const kHostSpeedFields[] = {"MaxSpeedBackward", "MaxSpeedStrafe", "MaxSpeedHover"};
+static float g_hostSpeed[3] = {0.f, 0.f, 0.f};
+static double g_speedCheckAt = 0;
+static int g_speedChecksLeft = 0;
+static uint64_t g_speedRestored = 0;
+
+static UObject* ShipMovementOf(AActor* pawn) {
+    if (!pawn || !IsValidObject((UObject*)pawn)) return nullptr;
+    UObject* c = UE_FIELD(UObject*, pawn, es2off::AESPawn::ShipMovement);
+    return (c && IsValidObject(c)) ? c : nullptr;
+}
+
+static int SpeedFieldOffset(UObject* comp, const char* name) {
+    for (auto& pr : GetProperties((UStruct*)GetClass(comp), true))
+        if (pr.Name == name) return pr.Offset;
+    return -1;
+}
+
+static void RestoreHostSpeed() {
+    players::Player* me = players::Local();
+    UObject* mv = me ? ShipMovementOf(me->pawn) : nullptr;
+    if (!mv) return;
+    for (int i = 0; i < 3; ++i) {
+        if (g_hostSpeed[i] <= 0.f) continue;
+        int off = SpeedFieldOffset(mv, kHostSpeedFields[i]);
+        if (off < 0) continue;
+        float& base = UE_FIELD(float, mv, off + es2off::FBuffableFloat::BaseValue);
+        float& cur  = UE_FIELD(float, mv, off + es2off::FBuffableFloat::CurrentValue);
+        if (base >= g_hostSpeed[i] - 1.f) continue;          // nothing was lost
+        LOGF("[loadout] our %s was reset to %.0f by another player's ship; putting %.0f back",
+             kHostSpeedFields[i], base, g_hostSpeed[i]);
+        base = g_hostSpeed[i];
+        cur  = g_hostSpeed[i];
+        ++g_speedRestored;
+    }
+}
+
+// Taking the baseline at PostLogin is too late -- by then the values are already 4500 -- and the reset is
+// not host-specific: ES2 treats "the player's ship" as a singleton, so whichever pawn initialises SECOND
+// takes the stats and leaves the first at the class default. On the host that is the joiner's pawn
+// resetting the host's; on the client it is the host's remote pawn resetting the client's own (measured:
+// fixing only the host moved the 4500 straight over to the client).
+//
+// So both machines guard their own local pawn, and the baseline is simply the highest value seen for that
+// pawn: a reset only ever drops BaseValue to the class default, while real buffs and debuffs go through
+// the Modifiers array beside it. A refit or respawn is a different pawn, which re-baselines.
+static AActor* g_speedPawn = nullptr;
+
+void LocalShipSpeedTick() {
+    players::Player* me = players::Local();
+    UObject* mv = me ? ShipMovementOf(me->pawn) : nullptr;
+    if (!mv) return;
+    if (me->pawn != g_speedPawn) {               // different ship: start again from what it came up with
+        g_speedPawn = me->pawn;
+        for (int i = 0; i < 3; ++i) {
+            int off = SpeedFieldOffset(mv, kHostSpeedFields[i]);
+            g_hostSpeed[i] = off >= 0 ? UE_FIELD(float, mv, off + es2off::FBuffableFloat::BaseValue) : 0.f;
+        }
+        return;
+    }
+    for (int i = 0; i < 3; ++i) {
+        int off = SpeedFieldOffset(mv, kHostSpeedFields[i]);
+        if (off < 0) continue;
+        float cur = UE_FIELD(float, mv, off + es2off::FBuffableFloat::BaseValue);
+        if (cur > g_hostSpeed[i]) g_hostSpeed[i] = cur;      // the ship got better: that is the new truth
+    }
+    RestoreHostSpeed();
+}
+
+
 void OnPlayerJoined(int playerId) {
     g_applied.erase(playerId);
     g_respawn.erase(playerId);
@@ -713,6 +796,7 @@ static void CmdReticle(const console::Args&, std::string& out) {
 
 void HostTick(float dt) {
     g_hostNow += dt;
+    if (g_hostNow >= g_speedCheckAt) { g_speedCheckAt = g_hostNow + 1.0; LocalShipSpeedTick(); }
     if (g_respawn.empty()) return;
     for (auto it = g_respawn.begin(); it != g_respawn.end(); ) {
         if (!it->second.armed || g_hostNow < it->second.at) { ++it; continue; }
@@ -835,7 +919,8 @@ static void CmdShipData(const console::Args& a, std::string& out) {
                       (unsigned long long)g_prePostInit,
                       (unsigned long long)g_preBeginPlay, (int)LocalShipIsEmpty(pawn));
     } else if (sub == "stash") {
-        out += Format("  repairOnJoin=%d\n", (int)g_repairOnJoin);
+        out += Format("  repairOnJoin=%d | host speeds %.0f/%.0f/%.0f restored=%llu\n", (int)g_repairOnJoin,
+                      g_hostSpeed[0], g_hostSpeed[1], g_hostSpeed[2], (unsigned long long)g_speedRestored);
         for (auto& [id, s] : g_stash)
             out += Format("  player %d: %zu chars applied=%d hull=%.3f armor=%.3f\n", id, s.size(),
                           (int)g_applied[id], g_condition[id].health, g_condition[id].armor);
