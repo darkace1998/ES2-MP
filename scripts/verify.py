@@ -368,6 +368,22 @@ def main():
     check('the client holds no level actors the host destroyed', not ghosts,
           f'client {len(cset)}, host {len(hset)}' + (f', ghosts: {sorted(ghosts)[:3]}' if ghosts else ''))
 
+    # A joining client must keep its OWN ship condition. The loadout substitution replaces the ship's
+    # items but not its condition, so the joiner used to come up with the HOST's saved hull -- near-zero
+    # if the host's ship was wrecked -- and the first thing that ever fixed it was dying, because respawn
+    # restores to full. Compare what the client sent with what its pawn actually has on the host.
+    m = re.search(r'player (\d+): \d+ chars applied=\d+ hull=(-?[\d.]+)', con(HOST, 'shipdata stash'))
+    if m:
+        pid, sent_hull = m.group(1), float(m.group(2))
+        hm = re.search(rf'p{pid}\s+\S+\s+hp=([\d.]+)', con(HOST, 'combat'))
+        if hm and sent_hull >= 0:
+            check("a joining client keeps its own ship condition", abs(float(hm.group(1)) - sent_hull) < 0.02,
+                  f'client sent hull={sent_hull:.3f}, its ship on the host has {float(hm.group(1)):.3f}')
+        else:
+            print('INFO  ship condition: host has no hull reading for the joiner — not exercised')
+    else:
+        print('INFO  ship condition: no stashed loadout to compare — not exercised')
+
     mp = con(HOST, 'maxplayers')
     m = re.search(r'MaxPlayers=(\d+)', mp)
     check('host capacity >= 4 players', bool(m and int(m.group(1)) >= 4), mp.strip())

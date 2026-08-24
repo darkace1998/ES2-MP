@@ -10,6 +10,10 @@ it is regenerated and rebuilt.
 ## [Unreleased]
 
 ### Fixed
+- **A joining client inherited the host's hull condition.** The loadout substitution replaced a joiner's
+  ship items but not its condition, so its bars read whatever the host's saved ship was — zero if the
+  host's ship was wrecked — and the first thing that corrected them was dying, since respawn restores to
+  full. The client's own `Health`/`ArmorRatio` travel with its loadout and are now applied.
 - **A client could not damage plant enemies, mines or similar props.** They are level actors that do not
   replicate, so each machine loads and simulates its own private copy: the client kept ones the host had
   already destroyed (measured: host 0, client 16 in one location) and never saw damage on the ones that

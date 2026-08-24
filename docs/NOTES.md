@@ -856,3 +856,32 @@ host health 1 → 0.5 followed on the client (`sent=2 / applied=2`). `verify.py`
 long before the channel will carry anything. The reconcile therefore waits for the handshake
 (`players::LocalId() > 0`), retries every 4 s up to five times, and the host *always* answers — even with
 an empty list — so the client knows to stop.
+
+## A joining client inherited the host's hull condition (2026-08-24)
+
+Reported: "the first time the client joins the hitpoints are zero, then if it gets destroyed the client
+gets full hitpoints."
+
+Both halves are one bug and one correct behaviour. The loadout substitution replaces a joiner's ship
+**items** but not its **condition**: the pawn the host spawns takes its hull/armour from the host's own
+`UPlayerData`, so the joiner's bars read whatever the host's saved ship was. The second half is
+`respawn::DoRespawn` calling `RestoreHitpoints` — dying was simply the first thing that ever wrote a
+sane value.
+
+Established by provenance, using the blob-rewrite the loadout test already has:
+
+| | client's ship hull on the host |
+|---|---|
+| blob rewritten to `Health=1.000000`, before the fix | **0.01** (the host's saved value) |
+| host's LIVE hull set to 0.6, blob still `Health=1.0` | **0.01** — so it is the host's *saved* data, not its pawn |
+| same blob, after the fix | **1.000** |
+
+The exported `FShipDataState` does carry the client's own condition — `Health=` (hull ratio) and
+`ArmorRatio=` — it was simply never used. The host now parses both when it stashes the blob and applies
+them to the pawn it spawns for that player, through `SetCurrentHitpointsWithRatio` so the bars and
+delegates follow. `shipdata stash` shows the parsed values, and `verify.py` compares what the client sent
+against what its ship actually has on the host (27/27).
+
+**Careful reading the harness save:** its ship is genuinely at 1% hull. Plain single player, no co-op
+involved, reads `HitpointRatio = 0.01` with full shields — so "both ships show 0.01" in a test session is
+the save, not a bug. That cost a detour before the provenance test separated the two.

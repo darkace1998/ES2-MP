@@ -95,6 +95,9 @@ static std::map<int, std::string> g_recvBuf;
 struct Respawn { double at = 0; bool armed = false; };
 static std::map<int, Respawn> g_respawn;
 static std::map<int, bool> g_applied;
+// The client's own hull/armour condition, parsed out of its blob (see ApplyClientCondition).
+struct Condition { float health = -1.f, armor = -1.f; };
+static std::map<int, Condition> g_condition;
 static double g_hostNow = 0;
 
 // ---------------------------------------------------------------- export / import
@@ -185,7 +188,35 @@ void EndSubstitution() {
     g_substituting = -1;
 }
 
+// The exported FShipDataState carries the client's own ship condition as `Health=` (hull ratio) and
+// `ArmorRatio=`, but the spawn does not use them: a joining client's ship comes up with the HOST's saved
+// condition instead. Verified by provenance -- a blob rewritten to `Health=1.000000` still produced 0.01
+// on the host, which is the host's own UPlayerData value, and changing the host's LIVE hull to 0.6 did
+// not move it either. So a joiner's bars read whatever the host's saved ship was (near-zero here), and
+// the first thing that ever corrects them is dying, because respawn restores to full. Keep the client's
+// numbers when we stash the blob so the pawn we spawn for them can be set to their own condition.
+static UObject* ComponentOfClass(AActor* pawn, const char* clsName) {
+    UClass* want = FindClass(clsName);
+    if (!want || !pawn) return nullptr;
+    for (auto& pr : GetProperties((UStruct*)GetClass((UObject*)pawn), true)) {
+        if (pr.TypeName != "ObjectProperty") continue;
+        UObject* v = UE_FIELD(UObject*, pawn, pr.Offset);
+        if (v && IsValidObject(v) && IsA(v, want)) return v;
+    }
+    return nullptr;
+}
+
+static float ParseRatio(const std::string& text, const char* key) {
+    size_t at = text.find(key);
+    if (at == std::string::npos) return -1.f;
+    float v = (float)atof(text.c_str() + at + strlen(key));
+    return (v >= 0.f && v <= 1.f) ? v : -1.f;
+}
+
 void StashForPlayer(int playerId, const std::string& text) {
+    g_condition[playerId] = Condition{ParseRatio(text, "Health="), ParseRatio(text, "ArmorRatio=")};
+    LOGF("[loadout] player %d ship condition: hull=%.3f armor=%.3f",
+         playerId, g_condition[playerId].health, g_condition[playerId].armor);
     g_stash[playerId] = text;
     LOGF("[loadout] stashed ship for player %d (%zu chars)", playerId, text.size());
 }
@@ -685,6 +716,22 @@ void HostTick(float dt) {
                 UFunction* destroy = FindFunction((UObject*)oldPawn, "K2_DestroyActor");
                 if (destroy) ProcessEvent((UObject*)oldPawn, destroy, nullptr);
                 LOGF("[loadout] player %d: placeholder retired, now flying %s", id, GetName((UObject*)newPawn).c_str());
+            }
+            // Their ship, their condition -- not the host's. Through ES2's own setter so the bars and
+            // delegates follow (a raw field write leaves the HUD stale).
+            const Condition& c = g_condition[id];
+            for (auto& [cls, ratio] : {std::pair<const char*, float>{"HealthComponent", c.health},
+                                       std::pair<const char*, float>{"ArmorComponent", c.armor}}) {
+                if (ratio < 0.f) continue;
+                if (UObject* comp = ComponentOfClass(newPawn, cls)) {
+                    if (UFunction* fn = FindFunction(comp, "SetCurrentHitpointsWithRatio")) {
+                        float r = ratio; ProcessEvent(comp, fn, &r);
+                    }
+                }
+            }
+            if (c.health >= 0.f) {
+                LOGF("[loadout] player %d: restored their own condition (hull=%.3f armor=%.3f)",
+                     id, c.health, c.armor);
             } else {
                 LOGF("[loadout] player %d: restart produced pawn=%s (old=%s)", id, GetName((UObject*)newPawn).c_str(), GetName((UObject*)oldPawn).c_str());
             }
@@ -765,7 +812,9 @@ static void CmdShipData(const console::Args& a, std::string& out) {
                       (unsigned long long)g_prePostInit,
                       (unsigned long long)g_preBeginPlay, (int)LocalShipIsEmpty(pawn));
     } else if (sub == "stash") {
-        for (auto& [id, s] : g_stash) out += Format("  player %d: %zu chars applied=%d\n", id, s.size(), (int)g_applied[id]);
+        for (auto& [id, s] : g_stash)
+            out += Format("  player %d: %zu chars applied=%d hull=%.3f armor=%.3f\n", id, s.size(),
+                          (int)g_applied[id], g_condition[id].health, g_condition[id].armor);
         if (g_stash.empty()) out += "  (none)\n";
     } else if (sub == "apply") {
         int id = a.size() > 2 ? atoi(a[2].c_str()) : 1;
@@ -904,7 +953,7 @@ void MaybeSendOnJoin() {
 }
 void ResetSession() {
     g_sentThisSession = false; g_pendingSend.clear(); g_sendOffset = 0;
-    g_stash.clear(); g_recvBuf.clear(); g_respawn.clear(); g_applied.clear();
+    g_stash.clear(); g_recvBuf.clear(); g_respawn.clear(); g_applied.clear(); g_condition.clear();
 }
 // The two "done for this pawn" latches compare raw pointers. After a map change the allocator can hand
 // the new pawn the old address, and the HUD (which lives under the GameInstance and survives the
