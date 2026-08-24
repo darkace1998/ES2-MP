@@ -358,10 +358,15 @@ def main():
     # join, so the client must not hold any that the host does not have.
     def unrep_level_actors(port):
         out = set()
-        for line in con(port, 'actors ESPawn 60').splitlines():
+        lines = []
+        for cls in ('ESPawn', 'ProximityMineBase', 'ItemContainer'):
+            lines += con(port, f'actors {cls} 60').splitlines()
+        for line in lines:
             if 'rep=0' not in line: continue
             m = re.search(r'(PersistentLevel\.[A-Za-z0-9_]+)', line)
-            if m: out.add(m.group(1))
+            # Runtime-spawned actors get UE's _2147xxxxxxx names, which differ per machine and are not
+            # level actors at all -- the mod skips them (they have no bNetStartup), so must this.
+            if m and not re.search(r'_2147\d{5,}$', m.group(1)): out.add(m.group(1))
         return out
     hset, cset = unrep_level_actors(HOST), unrep_level_actors(CLIENT)
     ghosts = cset - hset

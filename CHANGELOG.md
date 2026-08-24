@@ -24,6 +24,10 @@ it is regenerated and rebuilt.
   ship items but not its condition, so its bars read whatever the host's saved ship was — zero if the
   host's ship was wrecked — and the first thing that corrected them was dying, since respawn restores to
   full. The client's own `Health`/`ArmorRatio` travel with its loadout and are now applied.
+- **Mines and loot containers were still desynced.** The previous fix scanned pawns, but mines and
+  containers derive straight from `AActor` — so mines stayed indestructible from a client and emptied
+  loot containers stayed standing on it. All three classes are covered now, and destruction hangs off
+  `UWorld::DestroyActor`, which every actor passes through.
 - **A client could not damage plant enemies, mines or similar props.** They are level actors that do not
   replicate, so each machine loads and simulates its own private copy: the client kept ones the host had
   already destroyed (measured: host 0, client 16 in one location) and never saw damage on the ones that

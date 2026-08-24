@@ -55,6 +55,7 @@ namespace es2rva {
   constexpr uint32_t UNetConnection_LowLevelGetRemoteAddress = 0x4D4AC48; // public: virtual class FString __cdecl UNetConnection::LowLevelGetRemoteAddress(bool)
   constexpr uint32_t UNetConnection_LowLevelDescribe = 0x4D4ABE4; // public: virtual class FString __cdecl UNetConnection::LowLevelDescribe(void)
   constexpr uint32_t APlayerController_ClientMessage = 0x4E7D48C; // public: void __cdecl APlayerController::ClientMessage(class FString const &, class FName, float)
+  constexpr uint32_t UWorld_DestroyActor = 0x14DB090; // public: bool __cdecl UWorld::DestroyActor(class AActor *, bool, bool)
   constexpr uint32_t UMissionLib_AddNonItemRewards = 0x5E71518; // public: static void __cdecl UMissionLib::AddNonItemRewards(struct FMissionRewards const &, class TEnumAsByte<enum EMissionType::Type> const &, class TEnumAsByte<enum EFactionGroup::Type> const &, class FName const &)
   constexpr uint32_t UInventoryLib_AddItemToRespectiveInventory = 0x5E47738; // public: static bool __cdecl UInventoryLib::AddItemToRespectiveInventory(class UItem *, bool)
   constexpr uint32_t UMissionLib_IncJobScore = 0x5E80918; // public: static void __cdecl UMissionLib::IncJobScore(int)

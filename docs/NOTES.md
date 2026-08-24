@@ -950,3 +950,36 @@ instance with no co-op at all.
 `shipdata repair [id|all]` (host) sets every player's hull, armour and shield back to full — the host
 owns every pawn, so repairing a client's own copy would just be overwritten by the next HP mirror a
 tenth of a second later. `shipdata repairjoin 1` does the same automatically for anyone who joins.
+
+### Mines and loot containers are not pawns (2026-08-24)
+
+The first pass at unreplicated level actors scanned `ESPawn`, which covers the plant enemies (cave
+anemones are pawns) and nothing else:
+
+```
+AProximityMineBase  ->  AActor      (not AESPawn)
+AItemContainer      ->  AActor      (not AESPawn)
+```
+
+So mines stayed indestructible from a client and every loot container the host had already emptied stayed
+standing on the client — the commit that claimed "plants, mines and other level props" only ever
+delivered plants. The mechanism was verified on a pawn and assumed to generalise; the class hierarchy
+says otherwise.
+
+Now fixed properly:
+
+- the reconcile and the health poll walk `ESPawn`, `ProximityMineBase` and `ItemContainer` (mines carry a
+  Health component, so their damage mirrors like an NPC's; containers only need the ghost sweep);
+- destruction hangs off **`UWorld::DestroyActor`** instead of `AESPawn::Destroyed`. Every destruction
+  funnels through it — `AActor::Destroy` and `K2_DestroyActor` both land there — so one hook covers every
+  class. It runs for every projectile and effect too, hence the `bNetStartup` byte check first:
+  UE's own "placed in the level, not spawned at runtime" flag, before anything builds a path string.
+
+Measured on the same progressed save: the query went from 17 paths to 34, the client retired 33 ghosts on
+join (16 anemones plus the containers), and destroying a shared level actor on the host removed the
+client's copy through the new funnel.
+
+**Runtime-spawned actors are not ghosts.** They get UE's `_2147xxxxxxx` names, which differ on every
+machine, and each side spawns its own. The mod skips them for free (no `bNetStartup`), but the first
+version of the harness check compared name sets and flagged one as a ghost — a failing check that was
+right about the difference and wrong about what it meant.

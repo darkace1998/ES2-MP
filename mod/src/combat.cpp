@@ -507,20 +507,40 @@ static bool g_reconcileAnswered = false;
 static int g_reconcileTries = 0;
 static double g_reconcileWait = 0;
 
+// bNetStartup is UE's own "placed in the level, not spawned at runtime" flag, and it is one byte -- worth
+// having because UWorld::DestroyActor below runs for every projectile and effect in a firefight, and
+// building a path name for each of those would be absurd.
+static inline bool IsLevelPlaced(AActor* a) {
+    return (UE_FIELD(uint8_t, a, es2off::AActor::bNetStartup_off) & es2off::AActor::bNetStartup_mask) != 0;
+}
+
 static bool IsUnreplicatedLevelActor(AActor* a) {
-    if (!a || !IsValidObject((UObject*)a) || GetReplicates(a)) return false;
+    if (!a || !IsValidObject((UObject*)a)) return false;
+    if (!IsLevelPlaced(a) || GetReplicates(a)) return false;
     return GetPathName((UObject*)a).find(":PersistentLevel.") != std::string::npos;
+}
+
+// The classes that suffer from this. ESPawn covers the plant enemies (cave anemones); mines and loot
+// containers derive straight from AActor, so scanning pawns alone missed them entirely -- mines stayed
+// indestructible from a client, and a client kept every container the host had already looted.
+static const char* const kUnreplicatedClasses[] = {"ESPawn", "ProximityMineBase", "ItemContainer"};
+
+static std::vector<AActor*> UnreplicatedLevelActors() {
+    std::vector<AActor*> out;
+    for (const char* n : kUnreplicatedClasses) {
+        UClass* c = FindClass(n);
+        if (!c) continue;
+        for (AActor* a : GetAllActorsOfClass(GetWorld(), c))
+            if (IsUnreplicatedLevelActor(a) && !players::ByPawn(a)) out.push_back(a);
+    }
+    return out;
 }
 
 // Client: ask the host which of our unreplicated level NPCs it does not have.
 static void SendGhostQuery() {
-    UClass* pawnClass = FindClass("ESPawn");
-    if (!pawnClass) return;
     std::string batch;
     int inBatch = 0;
-    for (AActor* a : GetAllActorsOfClass(GetWorld(), pawnClass)) {
-        if (!IsUnreplicatedLevelActor(a)) continue;
-        if (players::ByPawn(a)) continue;
+    for (AActor* a : UnreplicatedLevelActors()) {
         batch += "|" + GetPathName((UObject*)a);
         ++inBatch; ++g_ghostAsked;
         if (inBatch >= 4) { coop::SendToServer("NRQ" + batch); batch.clear(); inBatch = 0; }
@@ -974,6 +994,11 @@ static void HostNpcHpTick(float dt) {
         if (pawnClass)
             for (AActor* a : GetAllActorsOfClass(GetWorld(), pawnClass))
                 if (a && !players::ByPawn(a)) g_hostNpcCache.push_back(a);
+        // Mines are not pawns, but they carry a Health component and a client shoots at them like
+        // anything else, so their damage has to mirror too.
+        if (UClass* mine = FindClass("ProximityMineBase"))
+            for (AActor* a : GetAllActorsOfClass(GetWorld(), mine))
+                if (a) g_hostNpcCache.push_back(a);
     }
 
     size_t sent = 0;
@@ -1275,17 +1300,28 @@ static void PlayDeathFx(AActor* act) {
 
 using Fn_ActorVoid = void (*)(AActor*);
 static Fn_ActorVoid o_ESPawnDestroyed = nullptr;
+// Every actor destruction funnels through UWorld::DestroyActor -- AActor::Destroy and K2_DestroyActor
+// both land here -- so one hook covers plants, mines, containers and anything else unreplicated. The
+// AESPawn::Destroyed hook this replaces only ever saw pawns, which is why mines and loot containers were
+// still ghosts after the first attempt at this.
+using Fn_DestroyActor = bool (*)(UWorld* w, AActor* a, bool netForce, bool modifyLevel);
+static Fn_DestroyActor o_DestroyActor = nullptr;
+static bool H_DestroyActor(UWorld* w, AActor* a, bool netForce, bool modifyLevel) {
+    if (a && g_reconcile && coop::CurrentRole() == coop::Role::Host && players::Count() > 1
+        && IsLevelPlaced(a) && !GetReplicates(a) && !players::ByPawn(a)
+        && IsUnreplicatedLevelActor(a)) {
+        coop::SendToAllClients("NRD|" + GetPathName((UObject*)a));
+        ++g_ghostReported;
+    }
+    return o_DestroyActor(w, a, netForce, modifyLevel);
+}
+
 static void H_ESPawnDestroyed(AActor* a) {
     // Host: an unreplicated level actor just died here. Nothing about it is networked -- no channel, no
     // guid, no destruction message -- so the client would keep its own copy standing forever. Tell it by
     // path, which is the one identity the two machines share for level actors. This is what makes a
     // client's fire visibly kill a plant or a mine: the client's shot is applied on the host (the client
     // never damages anything itself), and this is the host reporting the outcome.
-    if (a && coop::CurrentRole() == coop::Role::Host && g_reconcile && players::Count() > 1
-        && IsUnreplicatedLevelActor(a) && !players::ByPawn(a)) {
-        coop::SendToAllClients("NRD|" + GetPathName((UObject*)a));
-        ++g_ghostReported;
-    }
     // Our copy is going away. If the host told us this one died, this is the moment to show it.
     if (a && coop::CurrentRole() == coop::Role::Client && !g_dying.empty()) {
         auto it = g_dying.find(a);
@@ -1936,6 +1972,7 @@ void OnInit() {
       hooks::Install("UGameplayLib::ApplyESRadialDamage", es2rva::UGameplayLib_ApplyESRadialDamage, (void*)&H_ApplyESRadialDamage, &orig);
       hooks::Enable("UGameplayLib::ApplyESRadialDamage", false); }
     hooks::Install("AESPawn::Destroyed", es2rva::AESPawn_Destroyed, (void*)&H_ESPawnDestroyed, (void**)&o_ESPawnDestroyed);
+    hooks::Install("UWorld::DestroyActor", es2rva::UWorld_DestroyActor, (void*)&H_DestroyActor, (void**)&o_DestroyActor);
     hooks::Install("UShieldComponent::TickRegeneration", es2rva::UShieldComponent_TickRegeneration, (void*)&H_TickRegeneration, (void**)&o_TickRegen);
     hooks::Install("UWeaponComponent::TickComponent", es2rva::UWeaponComponent_TickComponent, (void*)&H_WeaponTick, (void**)&o_WeaponTick);
     hooks::Install("UWeaponComponent::StartFire", es2rva::UWeaponComponent_StartFire, (void*)&H_StartFire, (void**)&o_StartFire);

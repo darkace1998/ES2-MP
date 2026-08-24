@@ -64,6 +64,7 @@ RVAS = {
     'UNetConnection_LowLevelGetRemoteAddress': 'public: virtual class FString __cdecl UNetConnection::LowLevelGetRemoteAddress(bool)',
     'UNetConnection_LowLevelDescribe': 'public: virtual class FString __cdecl UNetConnection::LowLevelDescribe(void)',
     'APlayerController_ClientMessage': 'public: void __cdecl APlayerController::ClientMessage(class FString const &, class FName, float)',
+    'UWorld_DestroyActor': 'public: bool __cdecl UWorld::DestroyActor(class AActor *, bool, bool)',
     'UMissionLib_AddNonItemRewards': 'public: static void __cdecl UMissionLib::AddNonItemRewards(struct FMissionRewards const &, class TEnumAsByte<enum EMissionType::Type> const &, class TEnumAsByte<enum EFactionGroup::Type> const &, class FName const &)',
     'UInventoryLib_AddItemToRespectiveInventory': 'public: static bool __cdecl UInventoryLib::AddItemToRespectiveInventory(class UItem *, bool)',
     'UMissionLib_IncJobScore': 'public: static void __cdecl UMissionLib::IncJobScore(int)',
