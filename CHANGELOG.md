@@ -13,6 +13,11 @@ it is regenerated and rebuilt.
 - `shipdata repairjoin 1` on the host hands joining players a repaired hull, for sessions whose saves are
   parked at near-zero hull. Off by default, since it otherwise erases real damage.
 - `shipdata rate N` and `shipdata repairjoin` were declared but unreachable — both are wired up now.
+- **A rejoining client flew the host's ship.** The flag that stops the host re-substituting a loadout is
+  keyed by player id, and a rejoin reuses the id — so after a dock (a disconnect and a reconnect) no
+  substitution was armed and the client kept the placeholder built from the host's own player data: the
+  host's ship model, the host's stats, a near-empty shield, until being destroyed forced a fresh spawn.
+  Every login now re-applies that player's ship. Shields also come up full on join.
 - **A joining client inherited the host's hull condition.** The loadout substitution replaced a joiner's
   ship items but not its condition, so its bars read whatever the host's saved ship was — zero if the
   host's ship was wrecked — and the first thing that corrected them was dying, since respawn restores to

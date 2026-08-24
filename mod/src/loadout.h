@@ -22,6 +22,7 @@ void HostTick(float dt);
 void MaybeSendOnJoin();
 void HudRebindTick();                   // re-point ES2's ingame HUD widget after the local pawn is replaced
 void CrosshairCategoryTick(float dt);   // keep the client's reticle matching the equipped weapon
+void OnPlayerJoined(int playerId);      // host: a (re)joining player must have its ship applied again
 void ResetSession();
 void OnWorldChanged();                  // forget the pawn latches (HUD rebind / weapon build) — the pointers are dead
 void ClientLocalShipTick();

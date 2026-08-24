@@ -531,6 +531,7 @@ void OnPostLogin(APlayerController* pc) {
     if (CurrentRole() != Role::Host) return;   // single-player map loads fire PostLogin too
     players::Player* pl = players::RegisterController(pc);
     world_state::OnPlayerJoined(pc);
+    if (pl && !pl->local) loadout::OnPlayerJoined(pl->id);
     // Hand the joiner its id unprompted instead of making it wait for a HELLO round trip. The client
     // sends its first HELLO the moment it has a local PlayerController, which measured 122 ms BEFORE
     // this function finished -- so that one is dropped and the id costs a full retry interval. We

@@ -905,3 +905,32 @@ edits matched nothing and were silently dropped. The pacing itself was live (8 c
 the join-latency measurement recorded); only its tunability was missing, despite being named in a commit
 message and in this file. Both are wired into the chain now. Worth remembering: a switch that is declared
 but never reachable reads exactly like a working one in the source.
+
+## The rejoining client flew the host's ship (2026-08-24)
+
+Reported: the client spawns damaged, its armour plating vanishes after a scratch, its shield is minimal,
+and **"the stats are like the ones of the host"** — then it dies once and everything is correct.
+
+That last clause is the diagnosis. `g_applied` is what stops the host re-substituting a loadout on every
+blob, and it is keyed by **player id** — but a rejoin reuses the id. Since docking became a disconnect and
+a reconnect (plan B), and since freed slots are now reused promptly, every undock came back into slot 1
+with `g_applied[1]` still set from the first join. No substitution respawn was armed, so the client kept
+flying the **placeholder the host had built from its own `UPlayerData`**: the host's ship model, the
+host's stats, a near-empty shield. Being destroyed was the only way out, because that respawn spawns
+through the substitution again.
+
+This was visible in this very file three commits earlier — "a rejoining client into a reused slot never
+gets its own ship re-applied" — noted while chasing something else and never fixed. The two changes that
+made rejoins routine turned it from a corner case into every dock.
+
+`loadout::OnPlayerJoined(id)` now clears that player's `applied` / `respawn` / `recvBuf` / `condition`
+state from `coop::OnPostLogin`, so any login — first, rejoin, or a reconnect after a bounced auto-join —
+applies the ship again.
+
+Verified with ship provenance rather than by eye: the client rewrites its blob to `ship_heavy_bomber`
+while the host flies `ship_medium_sentinel`. After a full dock round trip the host's copy of the client's
+pawn is **`ship_heavy_bomber`** — before the fix a rejoiner came back as the host's Sentinel.
+
+Shields are also brought to full on join now. The blob carries no shield ratio (shields are not saved
+condition, they regenerate), so a freshly joined ship came up with a near-empty bar — which is what
+"the shield are minimal" was.

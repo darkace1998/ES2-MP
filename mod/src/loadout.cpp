@@ -217,6 +217,20 @@ static float ParseRatio(const std::string& text, const char* key) {
     return (v >= 0.f && v <= 1.f) ? v : -1.f;
 }
 
+// A player that logs in again must have its ship applied again. `g_applied` is what stops the host
+// re-substituting on every blob, but it is keyed by player id, and a rejoin reuses the id: after a dock
+// (which is a disconnect and a reconnect, see travel.cpp) the flag was still set from the first join, so
+// no substitution respawn was armed and the client kept flying the placeholder the host had built from
+// its OWN UPlayerData -- the host's ship model, the host's stats, a near-empty shield. Being destroyed
+// was the only way out, because that respawn spawns through the substitution again.
+void OnPlayerJoined(int playerId) {
+    g_applied.erase(playerId);
+    g_respawn.erase(playerId);
+    g_recvBuf.erase(playerId);
+    g_condition.erase(playerId);
+    LOGF("[loadout] player %d (re)joined — their ship will be applied again", playerId);
+}
+
 void StashForPlayer(int playerId, const std::string& text) {
     g_condition[playerId] = Condition{ParseRatio(text, "Health="), ParseRatio(text, "ArmorRatio=")};
     LOGF("[loadout] player %d ship condition: hull=%.3f armor=%.3f",
@@ -725,8 +739,12 @@ void HostTick(float dt) {
             // delegates follow (a raw field write leaves the HUD stale).
             Condition c = g_condition[id];
             if (g_repairOnJoin) { c.health = 1.f; c.armor = 1.f; }
+            // The blob carries no shield ratio -- shields are not saved condition, they regenerate --
+            // so bring it up with the hull, which is what the death respawn already does. Left alone it
+            // comes up near empty and reads as "my shield is broken" on a freshly joined ship.
             for (auto& [cls, ratio] : {std::pair<const char*, float>{"HealthComponent", c.health},
-                                       std::pair<const char*, float>{"ArmorComponent", c.armor}}) {
+                                       std::pair<const char*, float>{"ArmorComponent", c.armor},
+                                       std::pair<const char*, float>{"ShieldComponent", 1.f}}) {
                 if (ratio < 0.f) continue;
                 if (UObject* comp = ComponentOfClass(newPawn, cls)) {
                     if (UFunction* fn = FindFunction(comp, "SetCurrentHitpointsWithRatio")) {
