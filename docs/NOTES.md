@@ -810,3 +810,49 @@ Measured both directions:
 
 `verify.py` now carries `a client's kill pays the client, not the host`, degrading to INFO where the
 location has no NPC with an XP component.
+
+## Why a client could not damage plants or mines (2026-08-24)
+
+Reported from a play test. The cause is a whole class of actor the mod had never accounted for.
+
+ES2's plant enemies (`BP_Cave_Anemone_*`), proximity mines (`BP_ProximityMine_Base`) and similar props
+are **level actors with `bReplicates=false` and `bNetLoadOnClient=true`**: every machine loads its own
+copy out of the map and simulates it privately. Nothing about them is networked — no channel, no
+`FNetworkGUID`, no destruction message. Confirmed on the CDOs and live (`rep=0` on every instance).
+
+That produced two failure modes, both of which read to a player as "I can't hurt these":
+
+- **Ghosts.** Anything the host had already destroyed — cleared before the client joined, or never
+  spawned because the save says the location is cleared — still existed on the client, forever. Measured
+  in S01L01 with a progressed save: **host 0 anemones, client 16**. Shooting one does nothing on either
+  machine, because the host has no such actor to shoot. The same desync was visible in loot: the client
+  held five `BP_ItemContainer_C` the host did not.
+- **No damage feedback.** Where both machines do have the actor, the client's fire is applied on the host
+  (a client never damages anything itself), the host's copy dies — and the client's copy never hears,
+  staying whole and apparently invulnerable.
+
+Neither could be fixed by the existing NPC mirroring, which is keyed on a guid and bails at
+`if (!guid) return`, and which only scans actors it can identify that way.
+
+**Identity is the path name.** Level actors are stably named and both machines load the same map, so
+`/Game/Maps/.../S01L01:PersistentLevel.BP_Cave_Anemone_patch2` means the same anemone on both — verified
+by resolving a client path on the host. Only `PersistentLevel` actors are reconciled: streamed sublevels
+can legitimately differ between machines, and "the host does not have it" would then be the wrong
+conclusion (the host and client genuinely differ on the DLC mission sublevel in S01L01).
+
+Three parts, all keyed by that path:
+
+| | what it fixes |
+|---|---|
+| `NRQ`/`NRD` reconcile on join | the client retires level actors the host does not have — 16 ghosts gone |
+| `NHP` health poll (path-keyed twin of `NH`) | the client's copy visibly takes damage instead of only vanishing |
+| `NRD` from the `AESPawn::Destroyed` hook | the host's kill actually removes the client's copy |
+
+Verified live: 16 → 0 ghosts on join; destroying a shared actor on the host removed the client's copy;
+host health 1 → 0.5 followed on the client (`sent=2 / applied=2`). `verify.py` grew
+`the client holds no level actors the host destroyed` and is 26/26.
+
+**The first query is always dropped**, exactly like the first HELLO: the client has a local controller
+long before the channel will carry anything. The reconcile therefore waits for the handshake
+(`players::LocalId() > 0`), retries every 4 s up to five times, and the host *always* answers — even with
+an empty list — so the client knows to stop.

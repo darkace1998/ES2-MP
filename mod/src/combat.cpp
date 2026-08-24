@@ -478,7 +478,111 @@ static void HostNpcAimTick(float dt) {
 }
 
 // Client: report where our own weapons are pointing.
+
+// ---------------------------------------------------------------- unreplicated level actors
+//
+// ES2's plant enemies (BP_Cave_Anemone_*), proximity mines and similar props are level actors with
+// bReplicates=false and bNetLoadOnClient=true: every machine loads its OWN copy out of the map and
+// simulates it privately. Nothing about them is networked, and the NPC mirroring below cannot help --
+// it is keyed on a FNetworkGUID, and an unreplicated actor has none (`if (!guid) return`).
+//
+// That leaves a client unable to damage them at all. Two separate failure modes, both reported as
+// "the client can't damage the plants or mines":
+//
+//   * GHOSTS. Anything the host already destroyed -- cleared before the client joined, or wiped by the
+//     save state at level load -- still exists on the client, forever. Measured in S01L01 with a
+//     progressed save: host 0 anemones, client 16. Shooting one does nothing on either machine, because
+//     the host has no such actor to shoot.
+//   * NO DAMAGE FEEDBACK. Where both machines do have the actor, the client's fire reaches the host and
+//     kills the host's copy, but the client's copy never hears about it and stays whole.
+//
+// Identity is the actor's path name: level actors are stably named, and the two machines load the same
+// map, so `/Game/Maps/.../S01L01:PersistentLevel.BP_Cave_Anemone_patch2` means the same anemone on both
+// (verified live). Only PersistentLevel actors are reconciled -- streamed sublevels can legitimately
+// differ between machines, and "the host does not have it" would then be the wrong conclusion.
+static uint64_t g_ghostAsked = 0, g_ghostKilled = 0, g_ghostReported = 0;
+static uint64_t g_unrepHpSent = 0, g_unrepHpApplied = 0;
+static bool g_reconcile = true;
+static bool g_reconcileAnswered = false;
+static int g_reconcileTries = 0;
+static double g_reconcileWait = 0;
+
+static bool IsUnreplicatedLevelActor(AActor* a) {
+    if (!a || !IsValidObject((UObject*)a) || GetReplicates(a)) return false;
+    return GetPathName((UObject*)a).find(":PersistentLevel.") != std::string::npos;
+}
+
+// Client: ask the host which of our unreplicated level NPCs it does not have.
+static void SendGhostQuery() {
+    UClass* pawnClass = FindClass("ESPawn");
+    if (!pawnClass) return;
+    std::string batch;
+    int inBatch = 0;
+    for (AActor* a : GetAllActorsOfClass(GetWorld(), pawnClass)) {
+        if (!IsUnreplicatedLevelActor(a)) continue;
+        if (players::ByPawn(a)) continue;
+        batch += "|" + GetPathName((UObject*)a);
+        ++inBatch; ++g_ghostAsked;
+        if (inBatch >= 4) { coop::SendToServer("NRQ" + batch); batch.clear(); inBatch = 0; }
+    }
+    if (inBatch) coop::SendToServer("NRQ" + batch);
+    LOGF("[dmg] asked the host about %llu unreplicated level actor(s)", (unsigned long long)g_ghostAsked);
+}
+
+// Host: answer with the ones that are not here. Absent means the host destroyed it (or never spawned it
+// from its save state), so the client is holding a ghost.
+static bool AnswerGhostQuery(APlayerController* from, const std::string& body) {
+    std::string dead;
+    int seen = 0;
+    LOGF("[dmg] ghost query: %zu bytes", body.size());
+    size_t pos = 0;
+    while (pos <= body.size()) {
+        size_t bar = body.find('|', pos);
+        std::string path = body.substr(pos, bar == std::string::npos ? std::string::npos : bar - pos);
+        if (!path.empty()) {
+            ++seen;
+            UObject* o = FindObject(path);
+            if (!o || IsGarbage(o)) { dead += "|" + path; ++g_ghostReported; }
+        }
+        if (bar == std::string::npos) break;
+        pos = bar + 1;
+    }
+    LOGF("[dmg] ghost query: %d path(s), %s", seen, dead.empty() ? "all alive here" : "some are gone");
+    coop::SendToClient(from, "NRD" + dead);      // always answer, even with nothing: it stops the retries
+    return true;
+}
+
+// Client: retire the ghosts through ES2's own destroy so its Blueprint teardown runs.
+static bool ApplyGhostList(const std::string& body) {
+    g_reconcileAnswered = true;
+    size_t pos = 0;
+    while (pos <= body.size()) {
+        size_t bar = body.find('|', pos);
+        std::string path = body.substr(pos, bar == std::string::npos ? std::string::npos : bar - pos);
+        if (!path.empty()) {
+            if (UObject* o = FindObject(path)) {
+                if (UFunction* destroy = FindFunction(o, "K2_DestroyActor")) {
+                    ProcessEvent(o, destroy, nullptr);
+                    ++g_ghostKilled;
+                }
+            }
+        }
+        if (bar == std::string::npos) break;
+        pos = bar + 1;
+    }
+    LOGF("[dmg] retired %llu ghost actor(s) the host does not have", (unsigned long long)g_ghostKilled);
+    return true;
+}
+
 void ClientAimTick(float dt) {
+    // Ask once the handshake is done, and keep asking until answered. An early send is simply dropped --
+    // the same way the first HELLO is (see coop.cpp): the client has a local controller well before the
+    // channel will actually carry anything, and the first attempt here vanished silently.
+    if (g_reconcile && !g_reconcileAnswered && coop::CurrentRole() == coop::Role::Client
+        && players::LocalId() > 0 && g_reconcileTries < 5) {
+        g_reconcileWait += dt;
+        if (g_reconcileWait >= 4.0) { g_reconcileWait = 0; ++g_reconcileTries; SendGhostQuery(); }
+    }
     if (!g_aimSync || coop::CurrentRole() != coop::Role::Client) return;
     g_aimAccum += dt;
     // Streaming 20 Hz constantly measurably starved actor replication: mean NPC position error between
@@ -883,8 +987,20 @@ static void HostNpcHpTick(float dt) {
         auto same = [](float a, float b) { return fabsf(a - b) < 0.002f; };
         if (same(hull, last.hull) && same(shield, last.shield) && same(armor, last.armor)) continue;
         uint64_t guid = NetGuidOf((const UObject*)act);
-        if (!guid) continue;
         bool wasDead = last.announcedDead;
+        if (!guid) {
+            // An unreplicated level actor (plants, mines, props) has no guid to key on, so key it by path
+            // like the reconcile above. Without this the client's copy stays undamaged right up until the
+            // host destroys it, and the plant it is shooting at simply never reacts. Death still travels
+            // as NRD from the Destroyed hook, so nothing needs announcing here.
+            if (!g_reconcile || !IsUnreplicatedLevelActor(act)) continue;
+            last = NpcHp{hull, shield, armor, wasDead};
+            coop::SendToAllClients(Format("NHP|%s|%.3f|%.3f|%.3f",
+                                          GetPathName((UObject*)act).c_str(), hull, shield, armor));
+            ++g_unrepHpSent;
+            ++sent;
+            continue;
+        }
         last = NpcHp{hull, shield, armor, wasDead};
         if (hull <= 0.001f && !last.announcedDead) {
             last.announcedDead = true;
@@ -1160,6 +1276,16 @@ static void PlayDeathFx(AActor* act) {
 using Fn_ActorVoid = void (*)(AActor*);
 static Fn_ActorVoid o_ESPawnDestroyed = nullptr;
 static void H_ESPawnDestroyed(AActor* a) {
+    // Host: an unreplicated level actor just died here. Nothing about it is networked -- no channel, no
+    // guid, no destruction message -- so the client would keep its own copy standing forever. Tell it by
+    // path, which is the one identity the two machines share for level actors. This is what makes a
+    // client's fire visibly kill a plant or a mine: the client's shot is applied on the host (the client
+    // never damages anything itself), and this is the host reporting the outcome.
+    if (a && coop::CurrentRole() == coop::Role::Host && g_reconcile && players::Count() > 1
+        && IsUnreplicatedLevelActor(a) && !players::ByPawn(a)) {
+        coop::SendToAllClients("NRD|" + GetPathName((UObject*)a));
+        ++g_ghostReported;
+    }
     // Our copy is going away. If the host told us this one died, this is the moment to show it.
     if (a && coop::CurrentRole() == coop::Role::Client && !g_dying.empty()) {
         auto it = g_dying.find(a);
@@ -1215,6 +1341,22 @@ void ClientDeathFxTick(float dt) {
     }
 }
 
+// NHP|<path>|hull|shield|armor -- the unreplicated-level-actor twin of NH.
+static bool ApplyUnrepHp(const std::string& body) {
+    size_t bar = body.find('|');
+    if (bar == std::string::npos) return true;
+    float hull = -1, shield = -1, armor = -1;
+    if (sscanf(body.c_str() + bar + 1, "%f|%f|%f", &hull, &shield, &armor) < 1) return true;
+    UObject* o = FindObject(body.substr(0, bar));
+    if (!o) return true;
+    AActor* act = (AActor*)o;
+    ApplyRatio(act, "HealthComponent", hull);
+    ApplyRatio(act, "ShieldComponent", shield);
+    ApplyRatio(act, "ArmorComponent", armor);
+    ++g_unrepHpApplied;
+    return true;
+}
+
 static bool ApplyNpcHp(const std::string& body) {
     unsigned long long guid = 0; float hull = -1, shield = -1, armor = -1;
     if (sscanf(body.c_str(), "%llu|%f|%f|%f", &guid, &hull, &shield, &armor) < 2) return true;
@@ -1229,6 +1371,7 @@ static bool ApplyNpcHp(const std::string& body) {
 
 // ---------------------------------------------------------------- messages
 bool OnServerOp(APlayerController* from, const std::string& op, const std::string& body) {
+    if (op == "NRQ") return AnswerGhostQuery(from, body);
     if (op == "AIM") {
         double x = 0, y = 0, z = 0, tx = 0, ty = 0, tz = 0;
         unsigned long long l0 = 0, l1 = 0, a0 = 0, a1 = 0, tg = 0;
@@ -1253,6 +1396,8 @@ bool OnServerOp(APlayerController* from, const std::string& op, const std::strin
 }
 
 bool OnClientOp(const std::string& op, const std::string& body) {
+    if (op == "NRD") return ApplyGhostList(body);
+    if (op == "NHP") return ApplyUnrepHp(body);
     if (op == "WF") return ApplyNpcFire(body);
     if (op == "WA") return ApplyNpcAim(body);
     if (op == "NH") return ApplyNpcHp(body);
@@ -1289,6 +1434,7 @@ bool OnClientOp(const std::string& op, const std::string& body) {
 // keys below. UObject memory is recycled, so a stale entry is not merely dead weight: a new NPC at an
 // old address would inherit `announcedDead` and never get its explosion, or an old aim sample.
 void OnWorldChanged() {
+    g_reconcileAnswered = false; g_reconcileTries = 0; g_reconcileWait = 0;   // new map, new level actors
     g_npcFireState.clear();
     g_npcAim.clear(); g_npcLock.clear(); g_npcAutoAim.clear();
     g_npcTargets.clear(); g_npcCache.clear(); g_npcCacheAge = 0;
@@ -1624,8 +1770,14 @@ static void CmdCombat(const console::Args& a, std::string& out) {
     if (a.size() > 2 && a[1] == "locksync") { g_lockSync = a[2] == "1"; out += Format("lock sync %d\n", (int)g_lockSync); return; }
     if (a.size() > 2 && a[1] == "npcaim") { g_npcAimSync = a[2] == "1"; out += Format("npc aim sync %d\n", (int)g_npcAimSync); return; }
     if (a.size() > 2 && a[1] == "aimsync") { g_aimSync = a[2] == "1"; out += Format("aim sync %d\n", (int)g_aimSync); return; }
+    if (a.size() > 2 && a[1] == "reconcile") { g_reconcile = a[2] == "1"; g_reconcileAnswered = false; g_reconcileTries = 0; g_reconcileWait = 0; }
     if (a.size() > 2 && a[1] == "hphz") { g_healthHz = (float)atof(a[2].c_str()); if (!(g_healthHz >= 1.f)) g_healthHz = 1.f; }   // 0 meant "never" (1/0 = inf)
     if (a.size() > 2 && a[1] == "npcfire") g_mirrorNpcFire = a[2] == "1";
+    out += Format("unreplicatedHp sent=%llu applied=%llu\n",
+                  (unsigned long long)g_unrepHpSent, (unsigned long long)g_unrepHpApplied);
+    out += Format("reconcile=%d answered=%d tries=%d | asked=%llu reportedDead=%llu ghostsRetired=%llu\n",
+                  (int)g_reconcile, (int)g_reconcileAnswered, g_reconcileTries, (unsigned long long)g_ghostAsked,
+                  (unsigned long long)g_ghostReported, (unsigned long long)g_ghostKilled);
     out += Format("npcFireMirror=%d sent=%llu applied=%llu unresolved=%llu deduped=%llu\n", (int)g_mirrorNpcFire,
                   (unsigned long long)g_npcFireSent, (unsigned long long)g_npcFireApplied,
                   (unsigned long long)g_npcFireUnresolved, (unsigned long long)g_npcFireDeduped);

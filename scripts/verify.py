@@ -352,6 +352,22 @@ def main():
     else:
         print('INFO  XP attribution: no NPC with an XP component in this location — not exercised')
 
+    # Unreplicated level actors (ES2's plant enemies, proximity mines, props) are loaded independently by
+    # each machine and never networked, so a client used to keep its own copies of things the host had
+    # already destroyed -- invulnerable scenery it could shoot at forever. The host reconciles them on
+    # join, so the client must not hold any that the host does not have.
+    def unrep_level_actors(port):
+        out = set()
+        for line in con(port, 'actors ESPawn 60').splitlines():
+            if 'rep=0' not in line: continue
+            m = re.search(r'(PersistentLevel\.[A-Za-z0-9_]+)', line)
+            if m: out.add(m.group(1))
+        return out
+    hset, cset = unrep_level_actors(HOST), unrep_level_actors(CLIENT)
+    ghosts = cset - hset
+    check('the client holds no level actors the host destroyed', not ghosts,
+          f'client {len(cset)}, host {len(hset)}' + (f', ghosts: {sorted(ghosts)[:3]}' if ghosts else ''))
+
     mp = con(HOST, 'maxplayers')
     m = re.search(r'MaxPlayers=(\d+)', mp)
     check('host capacity >= 4 players', bool(m and int(m.group(1)) >= 4), mp.strip())

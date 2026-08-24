@@ -10,7 +10,11 @@ it is regenerated and rebuilt.
 ## [Unreleased]
 
 ### Fixed
-- Nothing yet.
+- **A client could not damage plant enemies, mines or similar props.** They are level actors that do not
+  replicate, so each machine loads and simulates its own private copy: the client kept ones the host had
+  already destroyed (measured: host 0, client 16 in one location) and never saw damage on the ones that
+  did exist. The host now reconciles them on join, mirrors their health, and reports their destruction,
+  all keyed by the level path both machines share.
 
 ### Verified
 - **XP from a client's kill goes to the client, not the host.** The path shipped in an earlier release
