@@ -10,6 +10,8 @@ it is regenerated and rebuilt.
 ## [Unreleased]
 
 ### Fixed
+- `shipdata repair [id|all]` on the host restores every player's hull, armour and shield — useful when a
+  save is parked at near-zero hull, since ES2's hull never regenerates.
 - `shipdata repairjoin 1` on the host hands joining players a repaired hull, for sessions whose saves are
   parked at near-zero hull. Off by default, since it otherwise erases real damage.
 - `shipdata rate N` and `shipdata repairjoin` were declared but unreachable — both are wired up now.

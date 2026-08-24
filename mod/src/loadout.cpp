@@ -944,6 +944,24 @@ static void CmdShipData(const console::Args& a, std::string& out) {
         out += Format("  ShipItemInstance: %s | Inventory: %s\n",
                       shipItem && IsValidObject(shipItem) ? UE_FIELD(FName, shipItem, es2off::UItem::ItemTemplateID).ToString().c_str() : "NULL",
                       inv && IsValidObject(inv) ? GetName(inv).c_str() : "NULL");
+    } else if (sub == "repair") {
+        // Hull does not regenerate in ES2, so a save parked at 1% starts every session one hit from
+        // death. Run on the HOST: it owns every player's pawn, and repairing a client's own copy would
+        // just be overwritten by the next HP mirror a tenth of a second later.
+        if (coop::CurrentRole() == coop::Role::Client) { out += "run this on the host — it owns every pawn\n"; return; }
+        std::string who = a.size() > 2 ? a[2] : "all";
+        for (auto* pl : players::All()) {
+            if (who != "all" && pl->id != atoi(who.c_str())) continue;
+            if (!pl->pawn) continue;
+            for (const char* cls : {"HealthComponent", "ArmorComponent", "ShieldComponent"}) {
+                if (UObject* comp = ComponentOfClass(pl->pawn, cls)) {
+                    if (UFunction* fn = FindFunction(comp, "SetCurrentHitpointsWithRatio")) {
+                        float r = 1.f; ProcessEvent(comp, fn, &r);
+                    }
+                }
+            }
+            out += Format("repaired player %d (%s)\n", pl->id, GetName((UObject*)pl->pawn).c_str());
+        }
     } else if (sub == "repairjoin") {
         if (a.size() > 2) g_repairOnJoin = a[2] == "1";
         out += Format("repairOnJoin=%d\n", (int)g_repairOnJoin);
@@ -952,12 +970,12 @@ static void CmdShipData(const console::Args& a, std::string& out) {
         out += Format("chunksPerTick=%d\n", g_chunksPerTick);
     } else if (sub == "on")  { g_enabled = true;  out += "loadout substitution ON\n"; }
     else if (sub == "off") { g_enabled = false; out += "loadout substitution OFF\n"; }
-    else out += "usage: shipdata [info|export|send|stash|apply <id>|weapons|devices|local|tweak <a> <b>|repairjoin 0/1|rate N|on|off]\n";
+    else out += "usage: shipdata [info|export|send|stash|apply <id>|weapons|devices|local|tweak <a> <b>|repair [id|all]|repairjoin 0/1|rate N|on|off]\n";
 }
 
 void Register() {
     console::Register("reticle", "reticle - why the client's reticle is or is not updating", CmdReticle);
-    console::Register("shipdata", "shipdata [info|export|send|stash|apply <id>|weapons|devices|local|repairjoin 0/1|rate N|on|off] - per-player ship loadout", CmdShipData);
+    console::Register("shipdata", "shipdata [info|export|send|stash|apply <id>|weapons|devices|local|repair [id|all]|repairjoin 0/1|rate N|on|off] - per-player ship loadout", CmdShipData);
     console::Register("ships", "ships [index] - list the ships this player owns / pick the one to fly", CmdShips);
 }
 

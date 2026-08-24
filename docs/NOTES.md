@@ -934,3 +934,19 @@ pawn is **`ship_heavy_bomber`** — before the fix a rejoiner came back as the h
 Shields are also brought to full on join now. The blob carries no shield ratio (shields are not saved
 condition, they regenerate), so a freshly joined ship came up with a near-empty bar — which is what
 "the shield are minimal" was.
+
+### The test save's ship is at 1% hull — measure before blaming the mod (2026-08-24)
+
+`GetCurrentHitpoints` / `GetMaxHitpoints` on the host's own ship read **8.36 / 835.59**. Plain single
+player, no co-op loaded at all, reads the same `HitpointRatio = 0.01` with full shields, so this is the
+save, not the session. Both machines load copies of it, so both players legitimately spawn at 1% — and
+ES2's hull does not regenerate, so it stays there until repaired at a station.
+
+This cost time twice: once when "both ships show 0.01" looked like the condition bug, and again when
+"the host and client have no health" looked like a regression. The cheap check is
+`call <healthComponent> GetCurrentHitpoints` for an absolute number, or loading the save in a single
+instance with no co-op at all.
+
+`shipdata repair [id|all]` (host) sets every player's hull, armour and shield back to full — the host
+owns every pawn, so repairing a client's own copy would just be overwritten by the next HP mirror a
+tenth of a second later. `shipdata repairjoin 1` does the same automatically for anyone who joins.
