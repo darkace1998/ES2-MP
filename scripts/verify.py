@@ -359,7 +359,7 @@ def main():
     def unrep_level_actors(port):
         out = set()
         lines = []
-        for cls in ('ESPawn', 'ProximityMineBase', 'ItemContainer'):
+        for cls in ('ESPawn', 'ProximityMineBase', 'ItemContainer', 'MinableBase'):
             lines += con(port, f'actors {cls} 60').splitlines()
         for line in lines:
             if 'rep=0' not in line: continue

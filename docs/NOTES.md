@@ -983,3 +983,46 @@ client's copy through the new funnel.
 machine, and each side spawns its own. The mod skips them for free (no `bNetStartup`), but the first
 version of the harness check compared name sets and flagged one as a ghost — a failing check that was
 right about the difference and wrong about what it meant.
+
+## Ore and crystal mining did not exist for a client (2026-08-24)
+
+Reported: the client cannot mine. It is worse than that — **the client could not see the ore at all**.
+
+`BP_Minable_*` derives from `AMinableBase` (a fourth native base after ESPawn, ProximityMineBase and
+ItemContainer) and, like the rest of that family, is `bReplicates=false` / `bNetLoadOnClient=true`. But
+unlike them it is **spawned at runtime** by the location generator, and UE does not run gameplay spawns on
+a client. Measured across two locations:
+
+| location | host nodes | client nodes |
+|---|---|---|
+| S01L02 | 4 | **0** |
+| S01L03 | 9 | 2 |
+
+Being runtime-spawned they have no stable path either (`BP_Minable_Resource_Aetheum_C_2147447036`), so
+the path-keyed reconcile used for plants and containers cannot identify them.
+
+**They take replication fine once asked — the catch is relevancy.** `SetReplicates(true)` alone changed
+nothing, because these are static props far from the players (the client's ship measured ~1.1M units from
+the nearest node) and UE culls them. `bAlwaysRelevant` plus `SetReplicates` makes the whole set appear,
+and from then on UE owns their spawn and destruction: verified 4/4 visible, and destroying one on the host
+took it off the client too. They also carry a NetGUID afterwards, so the existing guid-keyed health
+mirroring covers them for free. Applied only to runtime-spawned props (`combat share 0/1`); level-placed
+ones keep the path treatment, which is cheaper.
+
+### The third drop entry point was never hooked
+
+Mining a node drops by **resource ID**, and `UGameplayLib::SpawnPickupFromItemID` (05E3EDB0) was the one
+pickup-spawn function `loot.cpp` did not hook — despite already declaring its typedef and *calling* it on
+the client to spawn a mirrored drop. So a mined resource existed only on the host: measured host 3
+pickups / client 0, with `loot` reporting `sent=0`. Hooked now, and verified through `loot test
+ore_iron_common 1`: host `sent=1`, client `applied=1`, client pickups 0 → 1, each player collecting their
+own instanced copy.
+
+**Not verified:** that ES2's actual mining beam routes its drop through that function. It is the only
+ID-based spawn entry point and the node drops by `ResourceID`, so it should — but the harness cannot fire
+a mining laser, and `OnAutoHarvesting` (the auto-harvest perk callback) produced no drop. One real mining
+session settles it: `loot` on both machines shows `sent`/`applied` moving.
+
+A minable has no health component at all — it carries `RemainingYield` (8 on a fresh iron node),
+`ResourceID`, a `LootDropComponent` and instanced meshes. `ApplyDamage` does nothing to it, which is why
+an early attempt to "destroy" one and watch the drop proved nothing.

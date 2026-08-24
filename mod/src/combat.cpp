@@ -520,10 +520,37 @@ static bool IsUnreplicatedLevelActor(AActor* a) {
     return GetPathName((UObject*)a).find(":PersistentLevel.") != std::string::npos;
 }
 
-// The classes that suffer from this. ESPawn covers the plant enemies (cave anemones); mines and loot
-// containers derive straight from AActor, so scanning pawns alone missed them entirely -- mines stayed
-// indestructible from a client, and a client kept every container the host had already looted.
-static const char* const kUnreplicatedClasses[] = {"ESPawn", "ProximityMineBase", "ItemContainer"};
+// The classes that suffer from this, and there is a new one every time somebody plays. ESPawn covers the
+// plant enemies (cave anemones); mines, loot containers and minable resource nodes each derive straight
+// from AActor, so scanning pawns alone missed them entirely. MinableBase is the ore/crystal you shoot for
+// crafting materials -- note ES2 spells it "Minable", which is why a search for "Mineable" found nothing.
+static const char* const kUnreplicatedClasses[] = {"ESPawn", "ProximityMineBase", "ItemContainer",
+                                                   "MinableBase"};
+
+// Ore and crystal nodes (MinableBase) are spawned at RUNTIME by the location generator, and UE does not
+// run gameplay spawns on a client -- so a client has no ore to shoot at all: measured host 4 / client 0 in
+// S01L02, host 9 / client 2 in S01L03. Being runtime-spawned they also have no stable path, so the
+// reconcile above cannot identify them either.
+//
+// They take replication fine once asked, with one catch: they are static props sitting far from the
+// players, so relevancy culls them (the client's ship measured ~1.1M units from the nearest node and saw
+// nothing until this). bAlwaysRelevant + SetReplicates makes the whole set appear, and from then on UE
+// owns their spawn and destruction and they carry a NetGUID, so the guid-keyed health mirroring below
+// covers their damage for free. Applied only to runtime-spawned props: level-placed ones are identified
+// by path and need none of this.
+static bool g_shareProps = true;
+static uint64_t g_propsShared = 0;
+
+static void ShareRuntimeProp(AActor* a) {
+    if (!g_shareProps || !a || GetReplicates(a) || IsLevelPlaced(a)) return;
+    UE_FIELD(uint8_t, a, es2off::AActor::bAlwaysRelevant_off) |= es2off::AActor::bAlwaysRelevant_mask;
+    UFunction* fn = FindFunction((UObject*)a, "SetReplicates");
+    if (!fn) return;
+    bool on = true;
+    ProcessEvent((UObject*)a, fn, &on);
+    ++g_propsShared;
+    LOGF("[dmg] sharing %s with clients (runtime-spawned, was not replicated)", GetName((UObject*)a).c_str());
+}
 
 static std::vector<AActor*> UnreplicatedLevelActors() {
     std::vector<AActor*> out;
@@ -994,11 +1021,18 @@ static void HostNpcHpTick(float dt) {
         if (pawnClass)
             for (AActor* a : GetAllActorsOfClass(GetWorld(), pawnClass))
                 if (a && !players::ByPawn(a)) g_hostNpcCache.push_back(a);
-        // Mines are not pawns, but they carry a Health component and a client shoots at them like
-        // anything else, so their damage has to mirror too.
-        if (UClass* mine = FindClass("ProximityMineBase"))
-            for (AActor* a : GetAllActorsOfClass(GetWorld(), mine))
-                if (a) g_hostNpcCache.push_back(a);
+        // Mines and minable resource nodes are not pawns, but they carry a Health component and a client
+        // shoots them like anything else, so their damage has to mirror too. Anything in the list without
+        // health falls out below on `hull < 0`.
+        for (const char* n : kUnreplicatedClasses) {
+            if (std::string(n) == "ESPawn") continue;          // walked above, with players excluded
+            if (UClass* c = FindClass(n))
+                for (AActor* a : GetAllActorsOfClass(GetWorld(), c)) {
+                    if (!a) continue;
+                    ShareRuntimeProp(a);                       // no stable path: let UE replicate it
+                    g_hostNpcCache.push_back(a);
+                }
+        }
     }
 
     size_t sent = 0;
@@ -1806,9 +1840,11 @@ static void CmdCombat(const console::Args& a, std::string& out) {
     if (a.size() > 2 && a[1] == "locksync") { g_lockSync = a[2] == "1"; out += Format("lock sync %d\n", (int)g_lockSync); return; }
     if (a.size() > 2 && a[1] == "npcaim") { g_npcAimSync = a[2] == "1"; out += Format("npc aim sync %d\n", (int)g_npcAimSync); return; }
     if (a.size() > 2 && a[1] == "aimsync") { g_aimSync = a[2] == "1"; out += Format("aim sync %d\n", (int)g_aimSync); return; }
+    if (a.size() > 2 && a[1] == "share") g_shareProps = a[2] == "1";
     if (a.size() > 2 && a[1] == "reconcile") { g_reconcile = a[2] == "1"; g_reconcileAnswered = false; g_reconcileTries = 0; g_reconcileWait = 0; }
     if (a.size() > 2 && a[1] == "hphz") { g_healthHz = (float)atof(a[2].c_str()); if (!(g_healthHz >= 1.f)) g_healthHz = 1.f; }   // 0 meant "never" (1/0 = inf)
     if (a.size() > 2 && a[1] == "npcfire") g_mirrorNpcFire = a[2] == "1";
+    out += Format("shareRuntimeProps=%d (%llu shared)\n", (int)g_shareProps, (unsigned long long)g_propsShared);
     out += Format("unreplicatedHp sent=%llu applied=%llu\n",
                   (unsigned long long)g_unrepHpSent, (unsigned long long)g_unrepHpApplied);
     out += Format("reconcile=%d answered=%d tries=%d | asked=%llu reportedDead=%llu ghostsRetired=%llu\n",

@@ -7,6 +7,17 @@ Every release is pinned to one game build: the mod compares the game exe's PE ti
 baked into its SDK headers and disables itself if they differ, so after a game patch it stays inert until
 it is regenerated and rebuilt.
 
+## [Unreleased]
+
+### Fixed
+- **A client could not mine ore or crystals — it could not even see them.** Resource nodes are spawned at
+  runtime by the location generator, and UE does not run gameplay spawns on a client, so a client's sky
+  was simply empty of ore (measured: host 4 / client 0 in one location). The host now shares them, after
+  which UE handles their appearance and destruction on every machine.
+- **Mined resources never reached the client.** The drop path for resources — by item ID — was the one
+  pickup-spawn function the loot mirroring did not hook, so a mined resource existed only on the host.
+  Each player now gets their own instanced pickup.
+
 ## [0.2.1] - 2026-08-24
 
 Follow-up to 0.2.0, almost all of it from one play session's reports. Two of these made docking — the

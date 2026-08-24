@@ -31,6 +31,7 @@ using Fn_GetFirstCargoItem     = UObject* (*)(UObject* inventory);
 
 static Fn_SpawnPickupFromItem o_SpawnPickupFromItem = nullptr;
 static Fn_SpawnPickups        o_SpawnPickups = nullptr;
+static Fn_SpawnPickupFromItemID o_SpawnPickupFromItemID = nullptr;
 
 static bool g_enabled = true;
 static bool g_applying = false;          // client: we are spawning a mirrored pickup, do not re-broadcast
@@ -52,6 +53,26 @@ static void BroadcastItem(UObject* item, const FVector& loc) {
 }
 
 // ---------------------------------------------------------------- host hooks
+// The third drop entry point, and the one ore and crystal nodes use: they drop by resource ID rather
+// than from a UItem instance. It was never hooked, so mining dropped nothing on a client even though the
+// client already calls this very function to spawn its own copy of a mirrored drop -- measured after
+// mining a node: host 3 pickups, client 0, with the loot module reporting sent=0.
+static AActor* H_SpawnPickupFromItemID(UObject* wco, FName itemId, const FVector* loc, int level,
+                                       const FRotator* rot, bool* outOk) {
+    SpawnScope scope;
+    AActor* r = o_SpawnPickupFromItemID(wco, itemId, loc, level, rot, outOk);
+    if (scope.outermost() && g_enabled && !g_applying && coop::CurrentRole() == coop::Role::Host && r && loc) {
+        std::string tid = itemId.ToString();
+        if (tid.empty() || tid == "None") ++g_skipped;
+        else {
+            ++g_sent;
+            coop::SendToAllClients(Format("LOOT|%s|%d|%d|%.1f|%.1f|%.1f", tid.c_str(), level, 1,
+                                          loc->X, loc->Y, loc->Z));
+        }
+    }
+    return r;
+}
+
 static AActor* H_SpawnPickupFromItem(UObject* wco, UObject* item, const FVector* loc, const FRotator* rot, bool* outOk) {
     SpawnScope scope;
     AActor* r = o_SpawnPickupFromItem(wco, item, loc, rot, outOk);
@@ -138,6 +159,8 @@ void Register() {
 void OnInit() {
     hooks::Install("UGameplayLib::SpawnPickupFromItem", es2rva::UGameplayLib_SpawnPickupFromItem,
                    (void*)&H_SpawnPickupFromItem, (void**)&o_SpawnPickupFromItem);
+    hooks::Install("UGameplayLib::SpawnPickupFromItemID", es2rva::UGameplayLib_SpawnPickupFromItemID,
+                   (void*)&H_SpawnPickupFromItemID, (void**)&o_SpawnPickupFromItemID);
     hooks::Install("UGameplayLib::SpawnPickups", es2rva::UGameplayLib_SpawnPickups,
                    (void*)&H_SpawnPickups, (void**)&o_SpawnPickups);
 }
