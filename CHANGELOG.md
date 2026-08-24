@@ -7,39 +7,41 @@ Every release is pinned to one game build: the mod compares the game exe's PE ti
 baked into its SDK headers and disables itself if they differ, so after a game patch it stays inert until
 it is regenerated and rebuilt.
 
-## [Unreleased]
+## [0.2.1] - 2026-08-24
+
+Follow-up to 0.2.0, almost all of it from one play session's reports. Two of these made docking — the
+headline feature of 0.2.0 — worse than useless in practice, so this is worth taking if you have 0.2.0.
 
 ### Fixed
-- `shipdata repair [id|all]` on the host restores every player's hull, armour and shield — useful when a
-  save is parked at near-zero hull, since ES2's hull never regenerates.
-- `shipdata repairjoin 1` on the host hands joining players a repaired hull, for sessions whose saves are
-  parked at near-zero hull. Off by default, since it otherwise erases real damage.
-- `shipdata rate N` and `shipdata repairjoin` were declared but unreachable — both are wired up now.
 - **A rejoining client flew the host's ship.** The flag that stops the host re-substituting a loadout is
-  keyed by player id, and a rejoin reuses the id — so after a dock (a disconnect and a reconnect) no
-  substitution was armed and the client kept the placeholder built from the host's own player data: the
-  host's ship model, the host's stats, a near-empty shield, until being destroyed forced a fresh spawn.
-  Every login now re-applies that player's ship. Shields also come up full on join.
-- **A joining client inherited the host's hull condition.** The loadout substitution replaced a joiner's
-  ship items but not its condition, so its bars read whatever the host's saved ship was — zero if the
-  host's ship was wrecked — and the first thing that corrected them was dying, since respawn restores to
-  full. The client's own `Health`/`ArmorRatio` travel with its loadout and are now applied.
-- **Mines and loot containers were still desynced.** The previous fix scanned pawns, but mines and
-  containers derive straight from `AActor` — so mines stayed indestructible from a client and emptied
-  loot containers stayed standing on it. All three classes are covered now, and destruction hangs off
-  `UWorld::DestroyActor`, which every actor passes through.
-- **A client could not damage plant enemies, mines or similar props.** They are level actors that do not
-  replicate, so each machine loads and simulates its own private copy: the client kept ones the host had
-  already destroyed (measured: host 0, client 16 in one location) and never saw damage on the ones that
-  did exist. The host now reconciles them on join, mirrors their health, and reports their destruction,
-  all keyed by the level path both machines share.
+  keyed by player id, and a rejoin reuses the id — so after a dock (which is a disconnect and a
+  reconnect) no substitution was armed, and the client kept the placeholder the host had built from its
+  own player data: the host's ship model, the host's stats, a near-empty shield. Being destroyed was the
+  only way out. Every login now re-applies that player's ship.
+- **A client could not damage plant enemies, mines or loot props.** These are level actors that do not
+  replicate, so each machine loads and simulates its own private copy. A client kept ones the host had
+  already destroyed — measured at host 0 / client 16 in one location, plus five emptied loot containers —
+  and never saw damage on the ones that did exist. The host now reconciles them on join, mirrors their
+  health, and reports their destruction, keyed by the level path both machines share. Covers plant
+  enemies, proximity mines and item containers.
+- **A joining client inherited the host's hull condition.** The substitution replaced a joiner's ship
+  items but not its condition, so its bars read whatever the host's *saved* ship was — near-zero if that
+  save was wrecked — and the first thing that corrected them was dying. The client's own `Health` and
+  `ArmorRatio` travel with its loadout and are applied now, and its shield comes up full.
+- `shipdata rate N` and `shipdata repairjoin` were declared but unreachable, so neither switch did
+  anything. Both are wired up.
+
+### Added
+- `shipdata repair [id|all]` (host) restores every player's hull, armour and shield. ES2's hull never
+  regenerates, so a save parked at low hull otherwise starts every session one hit from death.
+- `shipdata repairjoin 0/1` (host) hands every joining player a repaired hull. Off by default, since it
+  otherwise erases real damage.
 
 ### Verified
-- **XP from a client's kill goes to the client, not the host.** The path shipped in an earlier release
-  but had never been seen firing, because every kill in the test save awards zero XP by ES2's own design
-  (a 4+ player-level delta zeroes the award, the local NPCs carry XP=0, and 20% damage share is
-  required). The harness now drives the award directly with those gates neutralised and checks both
-  directions.
+- **XP from a client's kill goes to the client, not the host.** Shipped earlier but never actually seen
+  firing, because every kill in the test save awards zero XP by ES2's own design: a 4+ player-level delta
+  zeroes the award, the local NPCs carry `XP=0`, and 20% damage share is required. The harness now drives
+  the award directly with those gates neutralised and checks both directions.
 
 ## [0.2.0] - 2026-08-24
 
@@ -117,6 +119,7 @@ listen server built on the engine's own actor replication.
 - NPC explosions were inconsistent — they now play when the ship is actually destroyed rather than when
   its hull reaches zero, and no longer depend on a Blueprint function that only ships have.
 
+[0.2.1]: https://github.com/darkace1998/ES2-MP/releases/tag/v0.2.1
 [0.2.0]: https://github.com/darkace1998/ES2-MP/releases/tag/v0.2.0
 [0.1.1]: https://github.com/darkace1998/ES2-MP/releases/tag/v0.1.1
 [0.1.0]: https://github.com/darkace1998/ES2-MP/releases/tag/v0.1.0
