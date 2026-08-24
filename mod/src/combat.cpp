@@ -541,8 +541,19 @@ static const char* const kUnreplicatedClasses[] = {"ESPawn", "ProximityMineBase"
 static bool g_shareProps = true;
 static uint64_t g_propsShared = 0;
 
+// ONLY resource nodes. The first cut shared every runtime-spawned prop in the list, which quietly
+// replicated nine live proximity mines and a couple of containers to the client as well -- gameplay
+// actors that detonate and that ES2 counts as hostiles for its cruise-mode checks
+// (EventCruiseModeEnemiesTooClose / EventCruiseModeBlocked). Mining needs none of that: it needs the ore
+// to exist on the client, nothing more. Widen this again only with a reason and a test.
+static bool IsShareableProp(AActor* a) {
+    UClass* c = FindClass("MinableBase");
+    return c && IsA((UObject*)a, c);
+}
+
 static void ShareRuntimeProp(AActor* a) {
     if (!g_shareProps || !a || GetReplicates(a) || IsLevelPlaced(a)) return;
+    if (!IsShareableProp(a)) return;
     UE_FIELD(uint8_t, a, es2off::AActor::bAlwaysRelevant_off) |= es2off::AActor::bAlwaysRelevant_mask;
     UFunction* fn = FindFunction((UObject*)a, "SetReplicates");
     if (!fn) return;

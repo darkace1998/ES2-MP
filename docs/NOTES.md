@@ -1026,3 +1026,21 @@ session settles it: `loot` on both machines shows `sent`/`applied` moving.
 A minable has no health component at all — it carries `RemainingYield` (8 on a fresh iron node),
 `ResourceID`, a `LootDropComponent` and instanced meshes. `ApplyDamage` does nothing to it, which is why
 an early attempt to "destroy" one and watch the drop proved nothing.
+
+
+### Sharing runtime props: keep it to resource nodes (2026-08-24)
+
+The first cut of `ShareRuntimeProp` shared every runtime-spawned actor in `kUnreplicatedClasses`, which in
+one session quietly replicated **nine live proximity mines** and two containers to the client alongside
+the four ore nodes. Mines are gameplay actors that detonate, and ES2 counts hostiles for its cruise-mode
+gating (`EventCruiseModeBlocked`, `EventCruiseModeEnemiesTooClose` on `AESPlayerController`) — so making a
+client suddenly aware of nine of them changes how its flight behaves, which is exactly what a "I can only
+fly in cruise now" report sounds like.
+
+Mining needs the ore to exist on the client and nothing else, so sharing is restricted to `MinableBase`.
+Widen it again only with a reason and a test. `combat share 0/1` still toggles it, and the log names every
+actor it shares — worth reading after any change here, since the class list is the whole blast radius.
+
+Cruise state itself is not inspectable from the console: it lives on `AESPlayerController` as delegates
+and private members with no reflected properties, so `props pc` shows nothing. Diagnosing a flight-mode
+report means bisecting switches, not reading state.
