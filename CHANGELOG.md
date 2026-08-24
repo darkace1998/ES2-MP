@@ -7,20 +7,24 @@ Every release is pinned to one game build: the mod compares the game exe's PE ti
 baked into its SDK headers and disables itself if they differ, so after a game patch it stays inert until
 it is regenerated and rebuilt.
 
-## [Unreleased]
+## [0.2.2] - 2026-08-25
+
+Mining, and a ship-speed bug that has been there since multiplayer first worked — it only became visible
+once 0.2.1 stopped clients flying the host's ship.
 
 ### Fixed
 - **A second player made the first one's ship slow.** ES2 treats the player ship as a singleton, so
-  whichever pawn initialised second took its movement stats and left the other at the class default —
-  reversing, strafing and hovering at ~59% speed while forward flight stayed normal, which reads as the
-  *other* player permanently cruising. Both machines now hold their own ship's values.
+  whichever pawn initialised second took its movement stats and left the other at the class default:
+  reversing, strafing and hovering at ~59% speed while forward flight stayed normal. It reads as the
+  *other* player permanently cruising, when in fact your own ship is the degraded one. Both machines now
+  hold their own ship's values.
 - **A client could not mine ore or crystals — it could not even see them.** Resource nodes are spawned at
   runtime by the location generator, and UE does not run gameplay spawns on a client, so a client's sky
-  was simply empty of ore (measured: host 4 / client 0 in one location). The host now shares them, after
-  which UE handles their appearance and destruction on every machine.
-- **Mined resources never reached the client.** The drop path for resources — by item ID — was the one
-  pickup-spawn function the loot mirroring did not hook, so a mined resource existed only on the host.
-  Each player now gets their own instanced pickup.
+  was simply empty of ore (measured: host 4 nodes, client 0). The host now shares them, after which UE
+  handles their appearance and destruction on every machine.
+- **Mined resources never reached the client.** Resources drop by item ID, and that was the one
+  pickup-spawn path the loot mirroring never hooked, so a mined resource existed only on the host. Each
+  player now gets their own instanced pickup — nobody can take another player's drop.
 
 ## [0.2.1] - 2026-08-24
 
@@ -134,6 +138,7 @@ listen server built on the engine's own actor replication.
 - NPC explosions were inconsistent — they now play when the ship is actually destroyed rather than when
   its hull reaches zero, and no longer depend on a Blueprint function that only ships have.
 
+[0.2.2]: https://github.com/darkace1998/ES2-MP/releases/tag/v0.2.2
 [0.2.1]: https://github.com/darkace1998/ES2-MP/releases/tag/v0.2.1
 [0.2.0]: https://github.com/darkace1998/ES2-MP/releases/tag/v0.2.0
 [0.1.1]: https://github.com/darkace1998/ES2-MP/releases/tag/v0.1.1
