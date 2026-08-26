@@ -42,19 +42,24 @@ def main():
     coop = con(HOST, 'coop')
     rx = re.search(r'rx=(\d+)', coop)
     check('client ship transforms reaching the host', bool(rx and int(rx.group(1)) > 0), f'rx={rx.group(1) if rx else 0}')
-    check('client owns its own movement (no rubberbanding)', 'repMove=0' in coop,
-          [l.strip() for l in coop.split('\n') if 'p1' in l][:1])
+    # The p1 ROW specifically: `coop` prints one per registered pawn, the host's own p0 included, and
+    # a bare substring test would pass on any of them.
+    p1row = re.search(r'^\s*p1\s.*$', coop, re.M)
+    check('client owns its own movement (no rubberbanding)', bool(p1row and 'repMove=0' in p1row.group(0)),
+          p1row.group(0).strip() if p1row else 'no p1 row')
 
     ti = con(HOST, 'travelinfo')
     check('world origin shifting disabled', 'worldOriginShiftingStack=0' in ti and 'bUseWorldOriginShifting=0' in ti)
 
     # The client streams its ~25 KB ship loadout to the host in ~54 reliable-RPC chunks; on a fresh
     # connect that can take up to a minute to arrive and apply, so poll rather than sample once.
+    # Player 1's own row (with more players, another row's applied=1 must not satisfy this).
+    applied1 = re.compile(r'player 1: .*applied=1')
     st = con(HOST, 'shipdata stash')
     for _ in range(30):
-        if 'player 1:' in st and 'applied=1' in st: break
+        if applied1.search(st): break
         time.sleep(3); st = con(HOST, 'shipdata stash')
-    check('host holds the client\'s ship loadout', 'player 1:' in st and 'applied=1' in st, st.strip().split('\n')[0])
+    check('host holds the client\'s ship loadout', bool(applied1.search(st)), st.strip().split('\n')[0])
     # Applying the loadout replaces the client's pawn; let that settle before anything reads a pawn
     # or one of its components, or the reads land on the actor that is about to be destroyed.
     time.sleep(6)
@@ -83,24 +88,29 @@ def main():
     # drive a real mission change on the host and watch the client's own PlayerData record follow
     tasks = con(HOST, 'missions')
     m = re.search(r'^\s+(\S+)\s+state=\d+\s+stage=\d+\s+progress=(\d+)', tasks, re.M)
-    mission_ok = False
-    if m:
+    # Every branch records the check: with the actor not found this used to record NOTHING, and the
+    # summary then counted N/N with the check silently missing.
+    if not m:
+        check('mission progress reaches the client\'s own PlayerData', False, 'no mission task found to drive')
+    else:
         tid = m.group(1)
-        acts = con(HOST, 'actors MissionTaskBase 20')
+        acts = con(HOST, 'actors MissionTaskBase 200')     # the first cached task is not necessarily in the first rows
         addr = None
         for line in acts.split('\n'):
             mm = re.match(r'([0-9A-F]{8,16})\s', line)
             if mm and tid in con(HOST, f'props 0x{mm.group(1)} MissionTaskID'):
                 addr = mm.group(1); break
-        if addr:
+        if not addr:
+            check('mission progress reaches the client\'s own PlayerData', False, f'task actor for {tid} not found among the mission actors')
+        else:
             want = 3 + (int(m.group(2)) % 5)
             con(HOST, f'call 0x{addr} SetProgress {want}')
             time.sleep(2)
             rec = con(CLIENT, f'missions {tid}')
-            mission_ok = f'progress={want}' in rec
+            # The PlayerData RECORD line, exactly (`missions` prints the client's actor rows first, and
+            # progress=3 is a substring of progress=30).
+            mission_ok = bool(re.search(rf"PlayerData record '{re.escape(tid)}':.*\bprogress={want}\b", rec))
             check('mission progress reaches the client\'s own PlayerData', mission_ok, f'{tid} -> progress={want}')
-    if not mission_ok and not m:
-        check('mission progress reaches the client\'s own PlayerData', False, 'no mission task found to drive')
 
     # loot: host drops one, the client should materialise its own copy
     before = con(CLIENT, 'loot')
@@ -308,10 +318,13 @@ def main():
         con(HOST, 'world grant 500 1000 5')
         time.sleep(4)
         after_h, after_c = wallet(HOST), wallet(CLIENT)
-        dh = (after_h[0] - before_h[0], after_h[1] - before_h[1])
-        dc = (after_c[0] - before_c[0], after_c[1] - before_c[1])
-        check('mission rewards reach the client', dc == (1000, 500) and dh == (1000, 500),
-              f'host +{dh[0]} credits/+{dh[1]} xp, client +{dc[0]} credits/+{dc[1]} xp')
+        if after_h and after_c:
+            dh = (after_h[0] - before_h[0], after_h[1] - before_h[1])
+            dc = (after_c[0] - before_c[0], after_c[1] - before_c[1])
+            check('mission rewards reach the client', dc == (1000, 500) and dh == (1000, 500),
+                  f'host +{dh[0]} credits/+{dh[1]} xp, client +{dc[0]} credits/+{dc[1]} xp')
+        else:
+            check('mission rewards reach the client', False, 'could not re-read UPlayerData credits/xp after the grant')
     else:
         check('mission rewards reach the client', False, 'could not read UPlayerData credits/xp')
 
@@ -324,7 +337,9 @@ def main():
         m = re.search(r'local player: credits=-?\d+ level=(-?\d+) xp=(-?\d+)', con(port, 'world'))
         return (int(m.group(1)), int(m.group(2))) if m else None
     npc = xpc = cpawn = cpc = None
-    for line in con(HOST, 'actors ESPawn 16').splitlines():
+    # Player pawns are spawned last, so they sit at the END of the actor list: a small cap never
+    # reached them in a location with a few NPCs and the check silently degraded to INFO.
+    for line in con(HOST, 'actors ESPawn 400').splitlines():
         m = re.match(r'([0-9A-F]{16}) (\S+)', line.strip())
         if not m: continue
         if 'Ship_Player' in m.group(2):
@@ -346,11 +361,15 @@ def main():
         con(HOST, f'call {xpc} OwnerHealthDepleted {npc} {cpawn} {cpc}')
         time.sleep(4)
         h1, c1 = xp_of(HOST), xp_of(CLIENT)
-        dh, dc = h1[1] - h0[1], c1[1] - c0[1]
-        check("a client's kill pays the client, not the host", dc == 250 and dh == 0,
-              f'client +{dc} xp, host +{dh} xp')
+        if h0 and c0 and h1 and c1:
+            dh, dc = h1[1] - h0[1], c1[1] - c0[1]
+            check("a client's kill pays the client, not the host", dc == 250 and dh == 0,
+                  f'client +{dc} xp, host +{dh} xp')
+        else:
+            check("a client's kill pays the client, not the host", False, 'could not read UPlayerData xp')
     else:
-        print('INFO  XP attribution: no NPC with an XP component in this location — not exercised')
+        print('INFO  XP attribution: no NPC with an XP component in this location — not exercised'
+              + f' (npc={bool(npc)} xpcomp={bool(xpc)} clientPawn={bool(cpawn)} clientPC={bool(cpc)})')
 
     # Unreplicated level actors (ES2's plant enemies, proximity mines, props) are loaded independently by
     # each machine and never networked, so a client used to keep its own copies of things the host had
@@ -359,8 +378,10 @@ def main():
     def unrep_level_actors(port):
         out = set()
         lines = []
+        # The cap applies BEFORE the rep=0 filter below, so it has to cover every actor of the class:
+        # at 60, ghosts past row 60 were invisible and the two machines' windows covered different actors.
         for cls in ('ESPawn', 'ProximityMineBase', 'ItemContainer', 'MinableBase'):
-            lines += con(port, f'actors {cls} 60').splitlines()
+            lines += con(port, f'actors {cls} 1000').splitlines()
         for line in lines:
             if 'rep=0' not in line: continue
             m = re.search(r'(PersistentLevel\.[A-Za-z0-9_]+)', line)

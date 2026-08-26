@@ -87,10 +87,27 @@ static UClass* g_buttonClass = nullptr;
 
 static void ForgetWidgets() {
     for (auto& s : g_slots) s = nullptr;
+    for (auto& t : g_slotText) t.clear();
     g_slotBox = nullptr;
     g_injected = g_injectedBox = nullptr;
     g_menu = g_button = g_statusButton = nullptr;
+    g_buttonClass = nullptr;
 }
+// Is our connect string currently published as Steam rich presence? Only the OFF click used to clear
+// it, so after a session ended friends kept seeing "Join Game" against a host that no longer existed.
+static bool g_presencePublished = false;
+static void PublishPresence(const std::string& cs) {
+    steamp2p::SetConnectPresence(cs);
+    g_presencePublished = !cs.empty();
+}
+static void ClearPresence() {
+    if (!g_presencePublished) return;
+    steamp2p::SetConnectPresence("");
+    g_presencePublished = false;
+}
+static UWorld* g_lastMenuWorld = nullptr;
+static coop::Role g_lastRole = coop::Role::None;
+static bool g_sessionCleanupPending = false;
 
 // ---------------------------------------------------------------- helpers
 // FindClass() only matches exact UClass objects, so Blueprint classes (WidgetBlueprintGeneratedClass)
@@ -160,11 +177,16 @@ static void OnMultiplayerClicked() {
         g_armHost = false;
         g_pendingJoin.clear();
         g_useSteamTransport = false;             // else a later LAN host would silently come up on Steam
-        steamp2p::SetConnectPresence("");        // stop advertising "Join Game" to friends
+        // ...and the transport `net` remembers has to follow, or `listen` still comes up on
+        // SteamNetDriver: `netdriver steam` persists, nothing here ever undid it.
+        LOGF("[menu] %s", console::Dispatch("netdriver ip", true).c_str());
+        ClearPresence();                         // stop advertising "Join Game" to friends
         LOGF("[menu] multiplayer OFF");
     } else {
+        // The plain toggle is the LAN path (IP listen server). Steam presence is published by the lobby
+        // slot click that selects the Steam transport -- an IP host advertised as steam.<id> only sends
+        // friends into a three-minute retry loop against a server they cannot reach.
         g_armHost = true;
-        steamp2p::SetConnectPresence(steamp2p::ConnectString());
         LOGF("[menu] multiplayer ON -> the next map loaded will host");
     }
     g_lastStatus.clear();      // force the readout to refresh
@@ -431,7 +453,7 @@ static void OnSlotClicked(int i) {
     // joiners come in by IP through the console and a SteamNetDriver would lock them out.
     g_useSteamTransport = true;
     std::string cs = steamp2p::ConnectString();
-    steamp2p::SetConnectPresence(cs);
+    PublishPresence(cs);
     LOGF("[menu] lobby slot %d clicked -> Steam invite (%s)", i + 1, cs.empty() ? "no steam id" : cs.c_str());
     steamp2p::OpenInviteOverlay(cs);
 }
@@ -500,7 +522,29 @@ void Tick(float dt) {
     UWorld* w = GetWorld();
     const std::string wn = WorldName(w);
     const bool inMenu = wn.find("MainMenu") != std::string::npos;
-    const bool inTransition = wn.empty() || wn == "EntryMap" || wn == "EmptyTransitionMap";
+    // (WorldName() spells a null world "null", so the pointer is what has to be tested.)
+    const bool inTransition = !w || wn == "EntryMap" || wn == "EmptyTransitionMap";
+    if (w != g_lastMenuWorld) {
+        // Every widget pointer we hold died with the old world. IsValidObject cannot tell a recycled
+        // address from the widget it used to be, so they are dropped on the change itself, not on
+        // "looks dead" (the slots/entry are only meant to survive a `menu rebuild` within one world).
+        g_lastMenuWorld = w;
+        ForgetWidgets();
+    }
+    // A session that ended (host or client back to None) leaves Steam-side state behind: the connect
+    // presence and the P2P accept gate. Clean up once we are genuinely back at the front end -- NOT on
+    // the role flip itself, because the host's own jump goes Host -> None -> Host through a new map and
+    // must keep both.
+    const coop::Role role = coop::CurrentRole();
+    if (g_lastRole != coop::Role::None && role == coop::Role::None) g_sessionCleanupPending = true;
+    g_lastRole = role;
+    if (g_sessionCleanupPending && inMenu && role == coop::Role::None) {
+        g_sessionCleanupPending = false;
+        ClearPresence();
+        steamp2p::SetHosting(false);
+        g_useSteamTransport = false;      // the next arm chooses its transport afresh (a slot click sets it again)
+        LOGF("[menu] session over — presence cleared, Steam accept gate closed");
+    }
     // The "PRESS ANY KEY" splash. A friend whose game was launched by an invite is sitting right here,
     // so this is where the join belongs: no keypress, no save to load, no menu to navigate.
     const bool atSplash = (wn == "EntryMap");
@@ -554,17 +598,25 @@ void Tick(float dt) {
         // Must precede the listen: EnableListenServer only creates a net driver when the world has none,
         // so a transport chosen afterwards is silently ignored. This also opens the Steam P2P accept
         // gate, which ES2 otherwise leaves shut and which drops incoming peers without a word.
-        if (g_useSteamTransport) LOGF("[menu] %s", console::Dispatch("netdriver steam", true).c_str());
+        // Always select explicitly: `net` persists whatever was chosen last, and a LAN host after a
+        // Steam session would otherwise silently come up on SteamNetDriver.
+        LOGF("[menu] %s", console::Dispatch(g_useSteamTransport ? "netdriver steam" : "netdriver ip", true).c_str());
         std::string r = console::Dispatch("listen 7777", true);
         LOGF("[menu] %s", r.c_str());
-        std::string cs = steamp2p::ConnectString();
-        steamp2p::SetConnectPresence(cs);
-        // The menu flow listens on whatever `netdriver` selected (IP by default) while the invite
-        // carries a steam.<id> address. Those only meet if the Steam transport was selected before
-        // this listen; say so rather than let an invite fail silently.
-        if (!cs.empty() && GetObjectClassName((UObject*)GetNetDriver(GetWorld())) != "SteamNetDriver")
-            LOGF("[menu] WARNING: advertising %s to Steam friends but hosting on %s — Steam invites cannot connect to an IP listen server (run 'netdriver steam' before the map loads, or have friends 'connect <ip>:7777')",
-                 cs.c_str(), GetObjectClassName((UObject*)GetNetDriver(GetWorld())).c_str());
+        const bool listening = r.find("-> 1") != std::string::npos && coop::CurrentRole() == coop::Role::Host;
+        if (!listening) {
+            LOGF("[menu] listen did not come up — nothing advertised");
+            ClearPresence();
+        } else if (g_useSteamTransport) {
+            std::string cs = steamp2p::ConnectString();
+            PublishPresence(cs);
+            // Steam invites only meet a SteamNetDriver; say so rather than let an invite fail silently.
+            if (!cs.empty() && GetObjectClassName((UObject*)GetNetDriver(GetWorld())) != "SteamNetDriver")
+                LOGF("[menu] WARNING: advertising %s to Steam friends but hosting on %s — Steam invites cannot connect to an IP listen server",
+                     cs.c_str(), GetObjectClassName((UObject*)GetNetDriver(GetWorld())).c_str());
+        } else {
+            ClearPresence();      // an IP host has nothing a Steam friend could join
+        }
     }
 
     // Only present in the main menu map; the widget is destroyed with it, so rebuild when it returns.

@@ -68,7 +68,7 @@ def main():
     # test: the weapon component sampled at the start belongs to the retired pawn, and the ship we
     # teleported next to the target is gone. Wait for the swap before touching anything.
     for _ in range(40):
-        if 'applied=1' in con(HOST, 'shipdata stash'): break
+        if re.search(r'player 1: .*applied=1', con(HOST, 'shipdata stash')): break    # player 1's own row
         time.sleep(5)
     else:
         print('!! client loadout never applied — results would race the pawn swap'); return 1
@@ -88,8 +88,11 @@ def main():
     cpawn = next((a for a in host_actors if a['name'] == cpawn_name), None)
     if not cpawn: print('cannot resolve client pawn address'); return 1
 
-    # make the host player invulnerable so it cannot die and confound the test
-    hpawn = next((a for a in host_actors if a['name'] == pl[0]['pawn']), None)
+    # Nobody may die mid-measurement: an idle host parked near enemies gets killed and voids the run, and
+    # a dead client is replaced by a new pawn the later `fire` commands then act on. The client's
+    # AUTHORITATIVE ship is its server-side pawn on the host (`god 1 1`); its own copy only mirrors it.
+    for port, cmd in ((HOST, 'god 1'), (HOST, 'god 1 1'), (CLIENT, 'god 1')):
+        print(f'  {port} {cmd}:', con(port, cmd).strip().split('\n')[0])
 
     # Prefer an isolated turret: scouts dogfight and damage each other, which contaminates the measurement.
     turrets = [a for a in host_actors if 'Turret' in a['cls']]

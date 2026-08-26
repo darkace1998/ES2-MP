@@ -40,16 +40,18 @@ WORLD=$(save_world "$SAVE") || true
 [[ -z "$WORLD" ]] && { echo "could not read location from $SAVE preview; assuming S01ML01"; WORLD=S01ML01; }
 echo "### save '$SAVE' -> world $WORLD"
 con() { python3 "$ROOT/scripts/console.py" "$@"; }
+# Timeouts are wall-clock: `status` is a game-thread command that blocks up to 30 s on a loading screen,
+# so counting iterations turned a "240 s" wait into ~44 minutes.
 wait_world() { # port world timeout
-  local port=$1 want=$2 t=${3:-180} i=0
-  while (( i < t )); do
+  local port=$1 want=$2 t=${3:-180} start=$SECONDS w=
+  while (( SECONDS - start < t )); do
     w=$(con "$port" status 2>/dev/null | sed -n 's/^world=\([^ ]*\).*/\1/p')
     [[ "$w" == "$want" ]] && return 0
-    sleep 3; i=$((i+3))
+    sleep 3
   done
   echo "timeout waiting for world=$want on port $port (last: '$w')"; return 1
 }
-wait_console() { local port=$1 t=${2:-180} i=0; while (( i < t )); do con "$port" ping >/dev/null 2>&1 && return 0; sleep 3; i=$((i+3)); done; echo "console $port not up"; return 1; }
+wait_console() { local port=$1 t=${2:-180} start=$SECONDS; while (( SECONDS - start < t )); do con "$port" ping >/dev/null 2>&1 && return 0; sleep 3; done; echo "console $port not up"; return 1; }
 [[ $KILL == 1 ]] && { scripts/kill.sh; sleep 3; }
 
 echo "### host: launch"; scripts/launch.sh host --port 27100 --res 1280x720 $NULLRHI_HOST

@@ -15,13 +15,11 @@ for tag in ['ErrorMessage','SecondsSinceStart','CrashType','IsEnsure','CommandLi
 m=re.search(r'<CallStack>(.*?)</CallStack>',t,re.S)
 cs=html.unescape(m.group(1)) if m else ''
 keys,names=pickle.load(open(os.path.join(sys.argv[2],'sdk/funcs.pkl'),'rb'))
-dllsyms=None
+dllsyms={}   # offset -> symbol; symbolize_dll.py spawns llvm-pdbutil, so each offset is resolved once
 def dllsym(off):
-    global dllsyms
-    if dllsyms is None:
-        out=subprocess.run(['python3',os.path.join(sys.argv[2],'tools/symbolize_dll.py'),os.path.join(sys.argv[2],'mod/build/dwmapi.pdb'),hex(off)],capture_output=True,text=True).stdout.strip()
-        return out
-    return ''
+    if off not in dllsyms:
+        dllsyms[off]=subprocess.run(['python3',os.path.join(sys.argv[2],'tools/symbolize_dll.py'),os.path.join(sys.argv[2],'mod/build/dwmapi.pdb'),hex(off)],capture_output=True,text=True).stdout.strip()
+    return dllsyms[off]
 print('CallStack:')
 for line in cs.strip().split('\n'):
     line=line.strip()
@@ -30,6 +28,7 @@ for line in cs.strip().split('\n'):
     mod,base,off=m.group(1),int(m.group(2),16),int(m.group(3),16)
     if mod.startswith('ES2-Win64'):
         i=bisect.bisect_right(keys,off)-1
+        if i<0: print(f'  ES2 +{off:x}  (below the first symbol)'); continue
         print(f'  ES2 +{off:x}  {names[i][:150]} +{off-keys[i]:x}')
     elif mod=='dwmapi':
         print(f'  MOD +{off:x}  {dllsym(off)}')

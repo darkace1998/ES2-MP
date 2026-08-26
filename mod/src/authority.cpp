@@ -66,7 +66,8 @@ static const std::string& ClassName(UClass* c) {
 static std::vector<std::string> g_blockBases = {
     "ESPawn",          // every ship: NPCs, drones, turrets  (the local player ship arrives via replication)
     "ProjectileBase",  // host-authoritative projectiles
-    "PickupBase",      // loot is host-owned; the client gets it replicated
+    // NOT PickupBase: ES2's pickups never replicate, so loot.cpp spawns each client's own copy of every
+    // drop the host announces -- a local, non-remote-owned spawn this guard would have blocked.
     "POISpawner",
     "SpawnComposition",
     "MissionBase",

@@ -145,7 +145,7 @@ static uint64_t LocalSteamIdViaOSS() {
     void* out[2] = {nullptr, nullptr};
     Rva<std::remove_pointer_t<Fn_GetUniquePlayerId>>(es2rva::FOnlineIdentitySteam_GetUniquePlayerId)(ident, out, 0);
     if (!out[0]) return 0;
-    return *reinterpret_cast<uint64_t*>(reinterpret_cast<char*>(out[0]) + 0x18);   // FUniqueNetIdSteam::UniqueNetId
+    return UE_FIELD(uint64_t, out[0], es2off::FUniqueNetIdSteam::UniqueNetId);
 }
 
 void SetHosting(bool on) {
@@ -178,8 +178,8 @@ static void CmdSteam(const console::Args& a, std::string& out) {
     std::string ndClass = nd ? ue::GetObjectClassName((UObject*)nd) : std::string("(none)");
     out += Format("4. active net driver               : %s\n", ndClass.c_str());
     if (nd && ndClass == "SteamNetDriver") {
-        // USteamNetDriver::bIsPassthrough at +0x980: 1 means it silently degraded to plain UDP
-        bool passthrough = UE_FIELD(uint8_t, nd, 0x980) != 0;
+        // bIsPassthrough set means it silently degraded to plain UDP
+        bool passthrough = UE_FIELD(uint8_t, nd, es2off::USteamNetDriver::bIsPassthrough) != 0;
         out += Format("   transport                      : %s\n", passthrough ? "PASSTHROUGH (plain UDP, not Steam P2P)" : "real Steam P2P");
     }
     out += Format("5. P2P accept gate                 : hosting=%d, forced-open %llu time(s)\n",

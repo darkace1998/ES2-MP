@@ -10,7 +10,8 @@ Linux/Proton. It is a Windows x64 `dwmapi.dll` proxy cross-compiled from Linux w
 shipped full PDB. Design: host-authoritative listen server using UE's native actor replication; the mod
 only patches the places where the game's single-player assumptions break. 2 players work end to end;
 structures are sized for 4. Not done (see `docs/NOTES.md` "Remaining"): a live 3–4 player run, a
-completed Steam join with a second account, an observed XP award, docking/stations/mission item rewards.
+completed Steam join with a second account, docking/stations/mission item rewards (XP-on-kill itself
+was observed and is verified by `verify.py`).
 
 `docs/NOTES.md` is the authoritative status/findings log (its "Hard-won gotchas" list is the crash
 history); `docs/PLAN.md` the phase plan; `docs/INSTALL.md` the end-user flow. There is no unit test,

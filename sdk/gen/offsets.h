@@ -438,8 +438,19 @@ namespace es2off {
     constexpr uint32_t SessionInterface = 0xF8; // TSharedPtr<FOnlineSessionSteam,1> (size 16) from FOnlineSubsystemSteam
     constexpr uint32_t IdentityInterface = 0x108; // TSharedPtr<FOnlineIdentitySteam,1> (size 16) from FOnlineSubsystemSteam
   }
+  namespace FUniqueNetIdSteam {
+    constexpr uint32_t __size = 32;
+    constexpr uint32_t UniqueNetId = 0x18; // unsigned __int64 (size 8) from FUniqueNetIdSteam
+  }
+  namespace USteamNetDriver {
+    constexpr uint32_t __size = 2440;
+    constexpr uint32_t bIsPassthrough = 0x980; // bool (size 1) from USteamNetDriver
+  }
   namespace UShipMovementComponent {
     constexpr uint32_t __size = 2848;
+    constexpr uint32_t MaxSpeedBackward = 0x1F0; // FBuffableFloat (size 64) from UShipMovementComponent
+    constexpr uint32_t MaxSpeedStrafe = 0x230; // FBuffableFloat (size 64) from UShipMovementComponent
+    constexpr uint32_t MaxSpeedHover = 0x270; // FBuffableFloat (size 64) from UShipMovementComponent
   }
   namespace FBuffableFloat {
     constexpr uint32_t __size = 64;

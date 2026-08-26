@@ -139,6 +139,19 @@ inline bool GetReplicateMovement(AActor* a) { return (UE_FIELD(uint8_t, a, es2of
 void SetReplicates(AActor* a, bool b);
 void SetReplicateMovement(AActor* a, bool b);
 
+// ---------------------------------------------------------------- cross-machine actor identity
+// The server-assigned FNetworkGUID is the one identity both machines agree on; payloads carry guids,
+// never pointers. 0 means "not replicated (yet)".
+void*    LocalGuidCache();                         // this world's net driver's FNetGUIDCache, or null
+uint64_t NetGuidOf(const UObject* actor);          // 0 when unknown / unreplicated
+// Resolve a guid back to an actor on THIS machine. The cache's own reverse lookup is only trustworthy
+// on a client, so the answer is round-tripped (NetGuidOf(result) == guid) and otherwise found by
+// scanning actors on the reliable object -> guid direction. A failed scan is remembered for a few
+// frames so a caller that retries every tick (weapon ticks do) does not walk GUObjectArray per frame.
+AActor*  ActorFromNetGuid(uint64_t guid);
+uint64_t GuidScans();                              // how many full scans ActorFromNetGuid has run
+void     ResetGuidLookup();                        // on a world change: the memo is per world
+
 // ---------------------------------------------------------------- reflection (FProperty)
 struct PropInfo {
     FProperty* Prop; std::string Name; std::string TypeName; int32_t Offset; int32_t ElementSize; int32_t ArrayDim; uint64_t Flags; UStruct* Owner;

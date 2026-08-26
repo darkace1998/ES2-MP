@@ -61,7 +61,9 @@ static APlayerController* H_GetPlayerController(const UObject* wco, int index) {
 
 // ---------------------------------------------------------------- award redirect
 static bool H_AddXP(float xp, bool hideAnim, bool ignoreCap, float delay) {
-    if (g_enabled && g_acting && !g_acting->local && g_acting->pc && xp > 0.f) {
+    // Not every AddXP inside a kill scope is the kill's: a mission payout completed by that kill is the
+    // HOST's own grant (world_state marks it and broadcasts the clients' share separately).
+    if (g_enabled && g_acting && !g_acting->local && g_acting->pc && xp > 0.f && !coop::InLocalAward()) {
         // A remote player earned this: it must land in THEIR UPlayerData, not ours.
         ++g_redirected;
         g_redirectedXP += xp;

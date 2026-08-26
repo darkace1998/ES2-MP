@@ -10,6 +10,7 @@ bool OnServerOp(ue::APlayerController* from, const std::string& op, const std::s
 bool OnClientOp(const std::string& op, const std::string& body);
 void Tick(float dt, bool isHost);
 void OnWorldChanged();          // drop every actor/component-keyed cache (the pointers are all dead)
+void OnPlayerLeft(int id);      // host: drop everything keyed on that player id (the slot is reused)
 void ClientAimTick(float dt);   // client: stream where our weapons point, so the host can aim them
 void SetClientDamageBlock(bool on);
 void ClientDamageNumbersTick(float dt);

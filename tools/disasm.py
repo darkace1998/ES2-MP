@@ -11,7 +11,9 @@ def sym(addr):
     if i < 0: return '?'
     return f'{names[i]}+{rva-keys[i]:x}' if rva - keys[i] else names[i]
 arg = sys.argv[1]; maxb = int(sys.argv[2]) if len(sys.argv) > 2 else 2048
-if re.fullmatch(r'[0-9A-Fa-fx]+', arg) and (arg.startswith('0x') or len(arg) >= 6):
+# An RVA is 0x-prefixed, or a bare hex number that contains at least one digit (a name such as
+# "Facade" or "deface" is made of hex letters only and used to be parsed as an address).
+if re.fullmatch(r'0[xX][0-9A-Fa-f]+', arg) or (re.fullmatch(r'[0-9A-Fa-f]{6,}', arg) and re.search(r'\d', arg)):
     rva = int(arg, 16)
 else:
     cands = [(k, n) for k, n in zip(keys, names) if arg in n]

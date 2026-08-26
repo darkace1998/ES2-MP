@@ -144,9 +144,10 @@ static void H_StopFireSecondary(APlayerController* pc) {
 using Fn_WeaponVoid = void (*)(UObject* weaponComponent);
 // FNetworkGUID is 8 bytes but NOT trivially copyable, so it is returned through a hidden pointer.
 // Member function => (this=RCX, sret=RDX, args...). Getting this wrong put the UObject* into the sret
-// slot, which is what faulted inside FNetGUIDCache::SupportsObject earlier.
+// slot, which is what faulted inside FNetGUIDCache::SupportsObject earlier. (The guid helpers
+// themselves -- NetGuidOf / ActorFromNetGuid / LocalGuidCache -- live in ue.cpp now, since coop's
+// PT relay needs them as well.)
 using Fn_GetNetGUID = void (*)(void* guidCache, uint64_t* sretGuid, const UObject* obj);
-using Fn_GetObjectFromNetGUID = UObject* (*)(void* guidCache, const uint64_t* guid, bool ignoreDeleted);
 
 static Fn_WeaponVoid o_StartFire = nullptr, o_StopFire = nullptr;
 static bool g_mirrorNpcFire = true;
@@ -192,13 +193,6 @@ static size_t g_npcAimCursor = 0;            // round-robin so a big fight canno
 static uint64_t g_npcAimSent = 0, g_npcAimApplied = 0;
 static constexpr size_t kNpcAimPerTick = 4;
 
-
-static void* LocalGuidCache() {
-    UNetDriver* nd = GetNetDriver(GetWorld());
-    return nd ? UE_FIELD(void*, nd, es2off::UNetDriver::GuidCache) : nullptr;   // TSharedPtr: object first
-
-}
-
 using Fn_GetLockedTarget = AActor* (*)(const UObject* wc);
 using Fn_SetLockedTarget = void (*)(UObject* wc, AActor* target);
 
@@ -211,49 +205,11 @@ static void SetLock(UObject* wc, AActor* target) {
     Rva<std::remove_pointer_t<Fn_SetLockedTarget>>(es2rva::UWeaponComponent_SetLockedTarget)(wc, target);
 }
 
-// NetGUID of an actor as this machine knows it. Both sides agree on the value — the server assigns it
-// and the client learns it through its own driver's cache — so it is the identity a lock travels as.
-static uint64_t NetGuidOf(const UObject* actor) {
-    void* cache = LocalGuidCache();
-    if (!cache || !actor) return 0;
-    uint64_t guid = 0;
-    Rva<std::remove_pointer_t<Fn_GetNetGUID>>(es2rva::FNetGUIDCache_GetNetGUID)(cache, &guid, actor);
-    return guid;
-}
-// Resolving a NetGUID back to an actor is only dependable on a CLIENT: that is the direction a client
-// needs, so its cache keeps the guid -> object map populated. A server mostly needs object -> guid, and
-// asking it the other way returns whatever happens to be there — observed handing back
-// Default__BP_Outlaw_Scout_C (a class default object!) for a guid that genuinely belonged to a turret.
-// Acting on that meant locking onto a CDO, which is why a client's lock never appeared on the host.
-//
-// So: try the cache, but only trust an answer that round-trips back to the same guid. Otherwise fall
-// back to scanning actors and matching on the object -> guid direction, which is reliable on both sides.
-// The scan only runs when a lock actually changes, not per tick.
-static uint64_t g_guidScans = 0;
-static AActor* ActorFromNetGuid(uint64_t guid) {
-    if (!guid) return nullptr;
-    void* cache = LocalGuidCache();
-    if (!cache) return nullptr;
-    uint64_t g = guid;
-    UObject* o = Rva<std::remove_pointer_t<Fn_GetObjectFromNetGUID>>(es2rva::FNetGUIDCache_GetObjectFromNetGUID)(cache, &g, false);
-    if (o && IsValidObject(o) && !(GetObjectFlags(o) & 0x10 /*RF_ClassDefaultObject*/)) {
-        uint64_t back = 0;
-        Rva<std::remove_pointer_t<Fn_GetNetGUID>>(es2rva::FNetGUIDCache_GetNetGUID)(cache, &back, o);
-        if (back == guid) return (AActor*)o;
-    }
-    ++g_guidScans;
-    AActor* found = nullptr;
-    UClass* actorClass = FindClass("Actor");
-    ForEachObject([&](UObject* obj) {
-        if (!actorClass || !IsA(obj, actorClass)) return true;
-        if (GetObjectFlags(obj) & 0x10) return true;                 // never a class default object
-        uint64_t back = 0;
-        Rva<std::remove_pointer_t<Fn_GetNetGUID>>(es2rva::FNetGUIDCache_GetNetGUID)(cache, &back, obj);
-        if (back == guid) { found = (AActor*)obj; return false; }
-        return true;
-    });
-    return found;
-}
+// NetGUID <-> actor: ue::NetGuidOf / ue::ActorFromNetGuid. Resolving a guid back to an actor is only
+// dependable on a CLIENT (a server's cache handed back a class default object for a turret's guid, and
+// acting on that meant locking onto a CDO), so the shared helper round-trips every answer and falls back
+// to an actor scan -- memoised per guid for a few frames, because the weapon tick below asks again every
+// frame for as long as a target stays unresolvable (typically: it just died).
 
 // Apply a locked target that arrived over the wire.
 //
@@ -298,13 +254,15 @@ static void MirrorNpcFire(UObject* wc, bool down) {
 
     auto it = g_npcFireState.find(wc);
     if (it != g_npcFireState.end() && it->second == down) { ++g_npcFireDeduped; return; }
-    g_npcFireState[wc] = down;
 
     void* cache = LocalGuidCache();
     if (!cache) return;
     uint64_t guid = 0;
     Rva<std::remove_pointer_t<Fn_GetNetGUID>>(es2rva::FNetGUIDCache_GetNetGUID)(cache, &guid, (const UObject*)owner);
-    if (!guid) return;                                     // not replicated to anyone yet
+    if (!guid) return;                                     // not replicated to anyone yet: nothing was told, so remember nothing
+    // Only a state that actually went out is a state to dedupe against; recording it before the guid
+    // check left an NPC that opened fire before it was replicated permanently "already down".
+    g_npcFireState[wc] = down;
     int cat = (int)UE_FIELD(uint8_t, wc, es2off::UWeaponComponent::WeaponCategory);
     ++g_npcFireSent;
     coop::SendToAllClients(Format("WF|%llu|%d|%d", (unsigned long long)guid, cat, (int)down));
@@ -341,11 +299,8 @@ static void H_StopFire(UObject* wc)  { o_StopFire(wc);  MirrorNpcFire(wc, false)
 // Resolve the weapon component a mirrored message refers to: NetGUID -> our own copy of that actor ->
 // the component for that weapon category.
 static UObject* ResolveNpcWeapon(unsigned long long guid, int cat) {
-    void* cache = LocalGuidCache();
-    if (!cache) return nullptr;
-    uint64_t g = guid;
-    UObject* obj = Rva<std::remove_pointer_t<Fn_GetObjectFromNetGUID>>(es2rva::FNetGUIDCache_GetObjectFromNetGUID)(cache, &g, false);
-    if (!obj || !IsValidObject(obj)) return nullptr;
+    UObject* obj = (UObject*)ActorFromNetGuid(guid);   // round-tripped; a miss is memoised, not rescanned per message
+    if (!obj) return nullptr;
     const char* prop = cat == 0 ? "PrimaryWeapons" : "SecondaryWeapons";
     for (auto& p : GetProperties((UStruct*)GetClass(obj), true))
         if (p.Name == prop) {
@@ -370,11 +325,7 @@ static bool ApplyNpcAim(const std::string& body) {
 static bool ApplyNpcFire(const std::string& body) {
     unsigned long long guid = 0; int cat = 0, down = 0;
     if (sscanf(body.c_str(), "%llu|%d|%d", &guid, &cat, &down) != 3) return true;
-    void* cache = LocalGuidCache();
-    if (!cache) return true;
-    uint64_t g = guid;
-    UObject* obj = Rva<std::remove_pointer_t<Fn_GetObjectFromNetGUID>>(es2rva::FNetGUIDCache_GetObjectFromNetGUID)(cache, &g, false);
-    AActor* best = (obj && IsValidObject(obj)) ? (AActor*)obj : nullptr;
+    AActor* best = ActorFromNetGuid(guid);
     if (!best) { ++g_npcFireUnresolved; return true; }
     const char* prop = cat == 0 ? "PrimaryWeapons" : "SecondaryWeapons";
     UObject* wc = nullptr;
@@ -435,6 +386,17 @@ static void ForEachWeaponComponent(AActor* pawn, const std::function<void(UObjec
         UObject* v = UE_FIELD(UObject*, pawn, p.Offset);
         if (v && IsValidObject(v) && IsA(v, want)) fn(v);
     }
+}
+
+// Drop everything keyed on a pawn's weapon components. Component addresses are recycled, so an entry
+// left behind by a dead NPC would be applied to whatever component the allocator puts there next --
+// on a client that meant a dead NPC's aim point and lock stamped onto a new NPC (or the player's own
+// weapons after a pawn swap) every tick; on the host a new component inherited the old trigger state
+// and its first StartFire was deduped away.
+static void ForgetNpcWeapons(AActor* pawn) {
+    ForEachWeaponComponent(pawn, [](UObject* wc) {
+        g_npcAim.erase(wc); g_npcAutoAim.erase(wc); g_npcLock.erase(wc); g_npcFireState.erase(wc);
+    });
 }
 
 // Host: NPC aim. Only components whose trigger is currently down are worth sending, and only a few per
@@ -606,30 +568,49 @@ static bool AnswerGhostQuery(APlayerController* from, const std::string& body) {
         pos = bar + 1;
     }
     LOGF("[dmg] ghost query: %d path(s), %s", seen, dead.empty() ? "all alive here" : "some are gone");
-    coop::SendToClient(from, "NRD" + dead);      // always answer, even with nothing: it stops the retries
+    // NRA is the ANSWER (it stops the client's retries, even when empty); NRD is the unsolicited
+    // per-destroy report from H_DestroyActor. They used to share an op, and any placed actor the host
+    // happened to destroy in the seconds before the client's first query latched "answered" -- so the
+    // query was never sent and every ghost from the save state stayed on the client for the whole map.
+    coop::SendToClient(from, "NRA" + dead);
     return true;
 }
 
-// Client: retire the ghosts through ES2's own destroy so its Blueprint teardown runs.
-static bool ApplyGhostList(const std::string& body) {
-    g_reconcileAnswered = true;
+// Client: paths the host does not have, waiting to be retired. DEFERRED to the tick: K2_DestroyActor
+// runs the actor's Blueprint teardown (ReceiveDestroyed / EndPlay), and Blueprint must never run from
+// inside the net receive path this handler is called on (see ClientDeathFxTick for the crash history).
+static std::vector<std::string> g_ghostQueue;
+
+static bool ApplyGhostList(const std::string& body, bool isAnswer) {
+    if (isAnswer) g_reconcileAnswered = true;
     size_t pos = 0;
     while (pos <= body.size()) {
         size_t bar = body.find('|', pos);
         std::string path = body.substr(pos, bar == std::string::npos ? std::string::npos : bar - pos);
-        if (!path.empty()) {
-            if (UObject* o = FindObject(path)) {
-                if (UFunction* destroy = FindFunction(o, "K2_DestroyActor")) {
-                    ProcessEvent(o, destroy, nullptr);
-                    ++g_ghostKilled;
-                }
-            }
-        }
+        if (!path.empty() && g_ghostQueue.size() < 1024) g_ghostQueue.push_back(path);
         if (bar == std::string::npos) break;
         pos = bar + 1;
     }
-    LOGF("[dmg] retired %llu ghost actor(s) the host does not have", (unsigned long long)g_ghostKilled);
     return true;
+}
+
+// Client: retire the queued ghosts through ES2's own destroy so its Blueprint teardown runs. A handful
+// per tick is plenty: the join-time answer is a few dozen paths at most, and after that it is one at a
+// time as the host destroys things.
+static void RetireGhostsTick() {
+    if (g_ghostQueue.empty()) return;
+    int n = 0;
+    while (!g_ghostQueue.empty() && n++ < 16) {
+        std::string path = std::move(g_ghostQueue.front());
+        g_ghostQueue.erase(g_ghostQueue.begin());
+        UObject* o = FindObject(path);
+        if (!o || IsGarbage(o)) continue;
+        if (UFunction* destroy = FindFunction(o, "K2_DestroyActor")) {
+            ProcessEvent(o, destroy, nullptr);
+            ++g_ghostKilled;
+        }
+    }
+    if (g_ghostQueue.empty()) LOGF("[dmg] retired %llu ghost actor(s) the host does not have", (unsigned long long)g_ghostKilled);
 }
 
 void ClientAimTick(float dt) {
@@ -692,6 +673,13 @@ static void H_WeaponTick(UObject* comp, float dt, int tickType, void* tickFn) {
     // this its weapons point wherever the client's idle copy happens to face.
     if (g_npcAimSync && comp && !g_npcAim.empty() && coop::CurrentRole() == coop::Role::Client) {
         auto it = g_npcAim.find(comp);
+        // The entry must still describe THIS component's owner: an NPC killed mid-burst never sends its
+        // trigger release, so its entry outlives it, and the address is recycled.
+        AActor* owner = it != g_npcAim.end() ? UE_FIELD(AActor*, comp, es2off::UActorComponent::OwnerPrivate) : nullptr;
+        if (it != g_npcAim.end() && (!owner || !IsValidObject((UObject*)owner) || players::ByPawn(owner))) {
+            g_npcAim.erase(it); g_npcAutoAim.erase(comp); g_npcLock.erase(comp);
+            it = g_npcAim.end();
+        }
         if (it != g_npcAim.end()) {
             UE_FIELD(FVector, comp, es2off::UWeaponComponent::FocusLocation) = it->second;
             UE_FIELD(FVector, comp, es2off::UWeaponComponent::ClampedNonAutoAimedFocusLocation) = it->second;
@@ -985,6 +973,7 @@ struct NpcHp { float hull = -1, shield = -1, armor = -1; bool announcedDead = fa
 static std::map<AActor*, NpcHp> g_npcHpLast;
 static std::vector<AActor*> g_hostNpcCache;
 static double g_hostNpcCacheAge = 0;
+static size_t g_hostNpcCursor = 0;
 
 
 // Announcing a death by POLLING is too late. HostNpcHpTick runs at 8 Hz over 8 NPCs a tick, so an ND
@@ -1046,9 +1035,15 @@ static void HostNpcHpTick(float dt) {
         }
     }
 
+    // Round-robin, like HostNpcAimTick: restarting from the head every call let a few continuously
+    // changing entries (a regenerating shield moves every sample) starve everything behind them --
+    // and mines, containers and ore sit behind every pawn in this list.
     size_t sent = 0;
-    for (AActor* act : g_hostNpcCache) {
-        if (sent >= kNpcHpPerTick) break;
+    const size_t count = g_hostNpcCache.size();
+    if (g_hostNpcCursor >= count) g_hostNpcCursor = 0;
+    for (size_t step = 0; step < count && sent < kNpcHpPerTick; ++step) {
+        AActor* act = g_hostNpcCache[(g_hostNpcCursor + step) % count];
+        if (step + 1 == count || sent + 1 == kNpcHpPerTick) g_hostNpcCursor = (g_hostNpcCursor + step + 1) % count;
         if (!act || !IsValidObject((UObject*)act)) continue;
         float hull = GetHealthRatio(act);
         if (hull < 0) continue;
@@ -1056,6 +1051,10 @@ static void HostNpcHpTick(float dt) {
         NpcHp& last = g_npcHpLast[act];
         auto same = [](float a, float b) { return fabsf(a - b) < 0.002f; };
         if (same(hull, last.hull) && same(shield, last.shield) && same(armor, last.armor)) continue;
+        // A dead NPC never heals, so hull back above zero under a latched entry means the address was
+        // recycled for a NEW actor (the map is pointer-keyed): forget the old death or this one is
+        // never announced and explodes for nobody.
+        if (last.announcedDead && hull > 0.001f) last.announcedDead = false;
         uint64_t guid = NetGuidOf((const UObject*)act);
         bool wasDead = last.announcedDead;
         if (!guid) {
@@ -1377,6 +1376,8 @@ static void H_ESPawnDestroyed(AActor* a) {
             g_dyingSince.erase(a);
         }
     }
+    // Both roles: its weapon components are about to be freed and their addresses reused.
+    if (a && !(g_npcAim.empty() && g_npcAutoAim.empty() && g_npcLock.empty() && g_npcFireState.empty())) ForgetNpcWeapons(a);
     o_ESPawnDestroyed(a);
 }
 
@@ -1396,9 +1397,10 @@ static bool ApplyNpcDeath(const std::string& body) {
     return true;
 }
 
-// Runs on the game thread, outside the net receive path. Only the safety net lives here now.
+// Runs on the game thread, outside the net receive path. The safety net and the ghost queue live here.
 void ClientDeathFxTick(float dt) {
     g_fxNow += dt;
+    RetireGhostsTick();
     if (g_dying.empty()) return;
     for (auto it = g_dying.begin(); it != g_dying.end(); ) {
         AActor* a = it->first;
@@ -1477,7 +1479,8 @@ bool OnServerOp(APlayerController* from, const std::string& op, const std::strin
 }
 
 bool OnClientOp(const std::string& op, const std::string& body) {
-    if (op == "NRD") return ApplyGhostList(body);
+    if (op == "NRA") return ApplyGhostList(body, true);    // the answer to our NRQ
+    if (op == "NRD") return ApplyGhostList(body, false);   // the host just destroyed a placed actor
     if (op == "NHP") return ApplyUnrepHp(body);
     if (op == "WF") return ApplyNpcFire(body);
     if (op == "WA") return ApplyNpcAim(body);
@@ -1485,22 +1488,24 @@ bool OnClientOp(const std::string& op, const std::string& body) {
     if (op == "ND") return ApplyNpcDeath(body);
     if (op == "DM") return ApplyDamageNumbers(body);
     if (op == "HP") {
-        // HP|<playerId>|<hull>|<shield>|<armor>
+        // HP|<playerId>|<hull>|<shield>|<armor>|<pawn guid>
         // This used to skip the local player, which meant a client never saw its OWN bars move:
         // ES2 replicates no hitpoint state and the client no-ops its own damage, so this message is
         // the only source of truth a client has for its condition. A missing armour field (-1) or an
         // absent component is simply skipped.
-        int id = 0; float hp = -1, sh = -1, ar = -1;
-        int n = sscanf(body.c_str(), "%d|%f|%f|%f", &id, &hp, &sh, &ar);
+        int id = 0; float hp = -1, sh = -1, ar = -1; unsigned long long guid = 0;
+        int n = sscanf(body.c_str(), "%d|%f|%f|%f|%llu", &id, &hp, &sh, &ar, &guid);
         if (n < 3) return true;
         players::Player* p = players::ById(id);
         AActor* pawn = p ? p->pawn : nullptr;
-        // The partner's slot is empty on a client (only the local slot is registered there), so fall
-        // back to the local controller's pawn when the message is about us.
+        // Our own slot is registered on a client; a partner's usually is not (the host's never is), so
+        // resolve those through the pawn guid the host put in the message. Without this the partner's
+        // bars never moved on a client, which is the whole point of the message.
         if (!pawn && id == players::LocalId()) {
             APlayerController* pc = LocalPC();
             pawn = pc ? UE_FIELD(AActor*, pc, es2off::AController::Pawn) : nullptr;
         }
+        if (!pawn && guid) pawn = ActorFromNetGuid(guid);
         if (!pawn || !IsValidObject((UObject*)pawn)) return true;
         ApplyRatio(pawn, "HealthComponent", hp);
         ApplyRatio(pawn, "ShieldComponent", sh);
@@ -1519,7 +1524,8 @@ void OnWorldChanged() {
     g_npcFireState.clear();
     g_npcAim.clear(); g_npcLock.clear(); g_npcAutoAim.clear();
     g_npcTargets.clear(); g_npcCache.clear(); g_npcCacheAge = 0;
-    g_npcHpLast.clear(); g_hostNpcCache.clear(); g_hostNpcCacheAge = 0;
+    g_npcHpLast.clear(); g_hostNpcCache.clear(); g_hostNpcCacheAge = 0; g_hostNpcCursor = 0;
+    g_ghostQueue.clear();
     g_aim.clear(); g_playerAutoAim.clear(); g_playerLock.clear();
     g_playerTargetGuid.clear(); g_playerTargetSeen.clear();
     g_dmgQueue.clear(); g_pendingDmg.clear(); g_pendingDeaths.clear();
@@ -1542,8 +1548,16 @@ void Tick(float dt, bool isHost) {
         if (!p->pawn) continue;
         float hp = GetHealthRatio(p->pawn), sh = GetShieldRatio(p->pawn), ar = GetArmorRatio(p->pawn);
         if (hp < 0) continue;
-        coop::SendToAllClients(Format("HP|%d|%.3f|%.3f|%.3f", p->id, hp, sh, ar));
+        coop::SendToAllClients(Format("HP|%d|%.3f|%.3f|%.3f|%llu", p->id, hp, sh, ar,
+                                      (unsigned long long)NetGuidOf((const UObject*)p->pawn)));
     }
+}
+
+// A slot is reused by the next joiner; whatever this id reported must not be stamped onto them.
+void OnPlayerLeft(int id) {
+    g_aim.erase(id); g_playerAutoAim.erase(id); g_playerLock.erase(id);
+    g_playerTargetGuid.erase(id); g_playerTargetSeen.erase(id);
+    g_dmgQueue.erase(id);
 }
 
 // ---------------------------------------------------------------- commands
@@ -1866,7 +1880,7 @@ static void CmdCombat(const console::Args& a, std::string& out) {
                   (unsigned long long)g_npcFireUnresolved, (unsigned long long)g_npcFireDeduped);
     out += Format("autoAimSync=%d autoAimApplied=%llu\n", (int)g_autoAimSync, (unsigned long long)g_autoAimApplied);
     out += Format("lockSync=%d lockApplied=%llu guidScans=%llu\n", (int)g_lockSync,
-                  (unsigned long long)g_lockApplied, (unsigned long long)g_guidScans);
+                  (unsigned long long)g_lockApplied, (unsigned long long)GuidScans());
     out += Format("npcAimSync=%d npcAimSent=%llu npcAimApplied=%llu npcAimTracked=%d\n",
                   (int)g_npcAimSync, (unsigned long long)g_npcAimSent, (unsigned long long)g_npcAimApplied, (int)g_npcAim.size());
     out += Format("dmgNumbers=%d dmgSent=%llu dmgShown=%llu dmgMerged=%llu\n", (int)g_dmgNumbers,
@@ -1910,10 +1924,17 @@ static void CmdCombat(const console::Args& a, std::string& out) {
 
 // god [0|1] - make the local ship's hull and shield undepletable. Test aid: an idle host parked next to
 // enemies otherwise dies mid-experiment and invalidates the run.
+// god [0|1] [playerId]: with a player id (host only) it is THAT player's server-side pawn -- the one
+// whose hitpoints are authoritative -- so a combat measurement can protect the client's ship too.
 static void CmdGod(const console::Args& a, std::string& out) {
     bool on = !(a.size() > 1 && (a[1] == "0" || a[1] == "off"));
     APlayerController* pc = LocalPC();
     AActor* pawn = pc ? UE_FIELD(AActor*, pc, es2off::AController::Pawn) : nullptr;
+    if (a.size() > 2) {
+        players::Player* p = players::ById(atoi(a[2].c_str()));
+        pawn = p ? p->pawn : nullptr;
+        if (!pawn) { out = "no such player / pawn\n"; return; }
+    }
     if (!pawn) { out = "no local pawn\n"; return; }
     int n = 0;
     for (const char* cls : {"HealthComponent", "ShieldComponent", "ArmorComponent"}) {
@@ -2003,7 +2024,7 @@ void Register() {
     console::Register("hp", "hp [Class] - health/shield ratios of pawns in the world", CmdHp);
     console::Register("lock", "lock [playerId] - acquire closest target (host: on that player's server-side pawn)", CmdLock);
     console::Register("aim", "aim [playerId] - lock closest target and point the hull at it (test aid)", CmdAim);
-    console::Register("god", "god [0|1] - make the local ship undepletable (test aid)", CmdGod);
+    console::Register("god", "god [0|1] [playerId] - make the local ship (host: that player's server-side ship) undepletable (test aid)", CmdGod);
 }
 
 void OnInit() {

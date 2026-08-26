@@ -45,6 +45,8 @@ static bool g_verbose = false;
 static double g_now = 0;                 // monotonic seconds accumulated from tick dt
 static bool g_welcomed = false;          // client: the host has acknowledged us
 // A client only has a registry slot for itself, so roster names for everyone else live here.
+// Rebuilt from every ROSTER and dropped with the session: a name that outlived its player made the
+// lobby overview show an occupied slot nobody could invite into.
 static std::map<int, std::string> g_remoteNames;
 static void RememberRemoteName(int id, const std::string& n) { g_remoteNames[id] = n; }
 std::string RosterName(int id) {
@@ -58,6 +60,10 @@ int RosterCount() {
     for (auto& [id, nm] : g_remoteNames) if (!players::ById(id)) ++n;
     return n;
 }
+static int g_localAwardDepth = 0;
+void PushLocalAward() { ++g_localAwardDepth; }
+void PopLocalAward() { if (g_localAwardDepth > 0) --g_localAwardDepth; }
+bool InLocalAward() { return g_localAwardDepth > 0; }
 static Fn_Void o_PushPause = nullptr, o_PopPause = nullptr;
 
 // smoothing tunables
@@ -130,12 +136,13 @@ static int RelevancySweep() {
 }
 
 // ---------------------------------------------------------------- channel
-void SendToServer(const std::string& msg) {
+bool SendToServer(const std::string& msg) {
     APlayerController* pc = GetFirstLocalPlayerController(GetWorld());
-    if (!pc) return;
+    if (!pc) return false;
     FString s("$" + msg);
     Rva<std::remove_pointer_t<Fn_ServerChangeName>>(es2rva::APlayerController_ServerChangeName)(pc, &s);
     ++g_txCount;
+    return true;
 }
 void SendToClient(APlayerController* pc, const std::string& msg) {
     if (!pc) return;
@@ -184,11 +191,17 @@ static bool RecvTransform(APlayerController* pc, const std::string& body) {
     ++g_rxCount;
     if (g_verbose && (pl->rxPackets % 40 == 1))
         LOGF("[coop] rx T p%d -> (%.0f %.0f %.0f)", pl->id, v[0], v[1], v[2]);
-    // relay to the other clients so they can see this ship move (2-player needs no relay)
+    // Relay to the other clients so they can see this ship move (2-player needs no relay). The host
+    // switches movement replication OFF for client-driven pawns (below), so this relay is the ONLY way a
+    // third player ever sees this ship move -- and a client has no controller for it, only the replicated
+    // pawn, so the relay names that pawn by its NetGUID.
     if (players::Count() > 2) {
-        std::string relay = Format("PT|%d|%s", pl->id, body.c_str());
-        for (auto* o : players::All())
-            if (!o->local && o->pc && o->pc != pc) SendToClient(o->pc, relay);
+        uint64_t guid = pl->pawn ? NetGuidOf((const UObject*)pl->pawn) : 0;
+        if (guid) {
+            std::string relay = Format("PT|%d|%llu|%s", pl->id, (unsigned long long)guid, body.c_str());
+            for (auto* o : players::All())
+                if (!o->local && o->pc && o->pc != pc) SendToClient(o->pc, relay);
+        }
     }
     return true;
 }
@@ -245,7 +258,7 @@ bool OnServerMessage(APlayerController* fromPC, const std::string& raw) {
     size_t bar = msg.find('|');
     std::string op = bar == std::string::npos ? msg : msg.substr(0, bar);
     std::string body = bar == std::string::npos ? "" : msg.substr(bar + 1);
-    if (g_role != Role::Host) return true;               // only the host acts on these
+    if (CurrentRole() != Role::Host) return true;        // only the host acts on these
     if (op == "T") { RecvTransform(fromPC, body); return true; }
     if (op == "HELLO") {
         players::Player* pl = players::ByController(fromPC);
@@ -278,6 +291,10 @@ bool OnClientMessage(APlayerController* toPC, const std::string& raw) {
     size_t bar = msg.find('|');
     std::string op = bar == std::string::npos ? msg : msg.substr(0, bar);
     std::string body = bar == std::string::npos ? "" : msg.substr(bar + 1);
+    // A client RPC sent to a LOCALLY controlled PlayerController executes right here on the host, so
+    // without this a WELCOME (or a mission snapshot) addressed to the host's own controller would run
+    // the client handlers on the host and rename its own slot.
+    if (CurrentRole() != Role::Client) return true;
     ++g_rxCount;
     if (op == "WELCOME") {
         int id = atoi(body.c_str());
@@ -289,14 +306,20 @@ bool OnClientMessage(APlayerController* toPC, const std::string& raw) {
         return true;
     }
     if (op == "PT") {
-        int id = atoi(body.c_str());
+        // PT|<id>|<pawn guid>|<10 doubles> -- another client's ship, relayed by the host. A client has no
+        // controller for that player, so the slot is keyed on the replicated pawn the guid names.
+        int id = 0; unsigned long long guid = 0;
         size_t b2 = body.find('|');
-        if (b2 != std::string::npos && id != players::LocalId()) {
+        size_t b3 = b2 == std::string::npos ? std::string::npos : body.find('|', b2 + 1);
+        if (b3 != std::string::npos && sscanf(body.c_str(), "%d|%llu", &id, &guid) == 2 && id != players::LocalId()) {
             players::Player* p = players::ById(id);
+            AActor* pawn = guid ? ActorFromNetGuid(guid) : nullptr;
+            if (pawn && (!p || p->pawn != pawn)) p = players::RegisterRemoteAs(id, pawn);
             double v[10];
-            if (p && p->pawn && ParseTransform10(body.c_str() + b2 + 1, v)) {
+            if (p && p->pawn && ParseTransform10(body.c_str() + b3 + 1, v)) {
                 p->tgtLoc = FVector{v[0], v[1], v[2]}; p->tgtRot = FQuat{v[3], v[4], v[5], v[6]};
                 p->tgtVel = FVector{v[7], v[8], v[9]}; p->tgtTime = g_now; p->hasTarget = true;
+                ++p->rxPackets; p->lastRxTime = g_now;
             }
         }
         return true;
@@ -314,8 +337,8 @@ bool OnClientMessage(APlayerController* toPC, const std::string& raw) {
 }
 
 // ---------------------------------------------------------------- pause hooks
-static void H_PushPause() { if (g_role != Role::None) { static int n = 0; if (n++ < 3) LOGF("[coop] PushPause suppressed (MP)"); return; } o_PushPause(); }
-static void H_PopPause() { if (g_role != Role::None) return; o_PopPause(); }
+static void H_PushPause() { if (CurrentRole() != Role::None) { static int n = 0; if (n++ < 3) LOGF("[coop] PushPause suppressed (MP)"); return; } o_PushPause(); }
+static void H_PopPause() { if (CurrentRole() != Role::None) return; o_PopPause(); }
 
 // ---------------------------------------------------------------- tick
 static double g_speedTickAccum = 0;
@@ -328,9 +351,13 @@ static double g_helloAccum = 0;
 static void OnRoleChanged(Role r) {
     LOGF("[coop] role -> %s (world %s)", RoleName(r), WorldName(GetWorld()).c_str());
     players::Reset();
+    g_remoteNames.clear();
     loadout::ResetSession();
+    combat::OnWorldChanged();      // per-player aim/lock/target state is per session too (slots get reused)
+    respawn::Reset();
     g_helloSent = false; g_welcomed = false; g_helloAccum = 0; g_sawLocalPC = false; g_helloTries = 0;
     if (r != Role::None) { ApplyNoPause(); travel::ApplyOriginShiftPolicy(true); }
+    else travel::ApplyOriginShiftPolicy(false);   // give single-player its origin rebasing back
     combat::SetClientDamageBlock(r == Role::Client);
     if (r == Role::Host) {
         players::SetLocalId(0);
@@ -359,7 +386,9 @@ void BroadcastRoster() {
 }
 
 static void ApplyRoster(const std::string& body) {
-    // body: "<id>=<name>|<id>=<name>|..."
+    // body: "<id>=<name>|<id>=<name>|..." -- the COMPLETE roster, so anyone not in it has left.
+    g_remoteNames.clear();
+    uint32_t present = 0;
     size_t pos = 0;
     while (pos < body.size()) {
         size_t bar = body.find('|', pos);
@@ -368,12 +397,15 @@ static void ApplyRoster(const std::string& body) {
         if (eq != std::string::npos) {
             int id = atoi(tok.substr(0, eq).c_str());
             std::string name = tok.substr(eq + 1);
+            if (id >= 0 && id < players::kMaxPlayers) present |= 1u << id;
             if (players::Player* p = players::ById(id)) p->name = name;
             else RememberRemoteName(id, name);
         }
         if (bar == std::string::npos) break;
         pos = bar + 1;
     }
+    for (auto* p : players::All())
+        if (!p->local && !(present & (1u << p->id))) players::UnregisterId(p->id);
 }
 
 static void Tick(float dt) {
@@ -384,8 +416,14 @@ static void Tick(float dt) {
         // A map load invalidates every actor pointer we hold (and single-player loads fire PostLogin too).
         g_lastWorld = w;
         players::Reset();
+        g_remoteNames.clear();
+        ResetGuidLookup();
         combat::OnWorldChanged();     // pointer-keyed caches (NPC state, HUD/pawn latches) must not survive a map
         loadout::OnWorldChanged();
+        respawn::Reset();
+        // Back at the front end means the session (and the save it was played from) is over; caches
+        // keyed on save content must not leak into the next one.
+        { std::string wn = WorldName(w); if (wn == "Map_MainMenu" || wn == "EntryMap") world_state::ResetSession(); }
         g_helloSent = false; g_welcomed = false; g_helloAccum = 0; g_sawLocalPC = false; g_helloTries = 0;
         if (r == Role::Host) {
             players::SetLocalId(0);
@@ -398,7 +436,11 @@ static void Tick(float dt) {
     if (r != g_role) { g_role = r; OnRoleChanged(r); }
     travel::Tick(dt, r == Role::Host);
     if (r == Role::None) return;
-    players::Refresh();
+    if (uint32_t freed = players::Refresh()) {
+        // A slot that went away is reused by the next joiner: nothing keyed on the id may survive it.
+        for (int id = 0; id < players::kMaxPlayers; ++id)
+            if (freed & (1u << id)) { combat::OnPlayerLeft(id); respawn::OnPlayerLeft(id); }
+    }
     loadout::HudRebindTick();   // the HUD caches the pawn; it must follow every pawn swap
     loadout::CrosshairCategoryTick(dt);   // clients never get ES2's SetWeaponCategory call
     if (r == Role::Host) {
@@ -442,6 +484,7 @@ static void Tick(float dt) {
         if (g_speedTickAccum >= 1.0) { g_speedTickAccum = 0; loadout::LocalShipSpeedTick(); }
         loadout::ClientBuildWeaponsTick();
         world_state::Tick(dt, false);
+        loot::ClientTick();
     }
 }
 
@@ -529,21 +572,42 @@ void OnInit() {
     console::RegisterTick("coop", Tick);
 }
 
+// Who is on the other end of a connection, independent of the slot it lands in: the remote address
+// without its port for IP play (a rejoin from the same machine keeps it), the SteamID for Steam. The
+// loadout stash is keyed on this so a NEW player reusing a freed slot never spawns in the previous
+// occupant's ship.
+static std::string ConnIdentity(UNetConnection* c) {
+    if (!c || !IsValidObject((UObject*)c)) return {};
+    FString addr;
+    VCall<void, FString*, bool>(c, vt::UNetConnection_LowLevelGetRemoteAddress, &addr, false);   // virtual (pure in the base)
+    return addr.ToUtf8();
+}
+
 // called from the net.cpp login hooks
 void OnPostLogin(APlayerController* pc) {
     if (CurrentRole() != Role::Host) return;   // single-player map loads fire PostLogin too
     players::Player* pl = players::RegisterController(pc);
+    // PostLogin also fires for the host's OWN controller on a listen-server map load. Nothing below is
+    // for that one: a client RPC to a local controller executes locally, so a WELCOME sent to ourselves
+    // would run the client handlers on the host.
+    if (!pl || pl->local) return;
     world_state::OnPlayerJoined(pc);
-    if (pl && !pl->local) loadout::OnPlayerJoined(pl->id);
+    loadout::OnPlayerJoined(pl->id, ConnIdentity(pl->conn));
     // Hand the joiner its id unprompted instead of making it wait for a HELLO round trip. The client
     // sends its first HELLO the moment it has a local PlayerController, which measured 122 ms BEFORE
     // this function finished -- so that one is dropped and the id costs a full retry interval. We
     // already know the id here. HELLO stays as the fallback (and is what carries the player's name),
     // and WELCOME is idempotent on the client, so arriving twice is harmless.
-    if (pl) {
-        SendToClient(pc, Format("WELCOME|%d|%d", pl->id, players::Count()));
-        BroadcastRoster();
-    }
+    SendToClient(pc, Format("WELCOME|%d|%d", pl->id, players::Count()));
+    BroadcastRoster();
 }
-void OnLogout(APlayerController* pc) { players::UnregisterController(pc); }
+void OnLogout(APlayerController* pc) {
+    if (players::Player* pl = players::ByController(pc)) { combat::OnPlayerLeft(pl->id); respawn::OnPlayerLeft(pl->id); }
+    players::UnregisterController(pc);
+}
+void OnSaveLoad() {
+    // A different save means different mission records; a snapshot built from the old one must not be
+    // replayed to the next joiner.
+    world_state::ResetSession();
+}
 }

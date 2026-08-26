@@ -32,7 +32,11 @@ void Reset();
 Player* RegisterController(ue::APlayerController* pc);
 // Client side: record our own controller under the id the host assigned us.
 Player* RegisterLocalAs(ue::APlayerController* pc, int id);
+// Client side: another player's ship, known only by the pawn the host's PT relay named (no controller
+// exists here). The slot is dropped again as soon as that pawn goes away.
+Player* RegisterRemoteAs(int id, ue::AActor* pawn);
 void UnregisterController(ue::APlayerController* pc);
+void UnregisterId(int id);
 void SetPruneDeparted(bool on);   // free a remote slot as soon as its controller is pending-kill
 bool PruneDeparted();
 Player* ByController(ue::APlayerController* pc);
@@ -41,8 +45,9 @@ Player* ById(int id);
 Player* Local();
 int Count();
 std::vector<Player*> All();
-// Refresh pawn pointers / drop dead entries. Call from the game thread each tick.
-void Refresh();
+// Refresh pawn pointers / drop dead entries. Call from the game thread each tick. Returns a bitmask of
+// the ids whose slot was freed this call, so per-player state elsewhere can be dropped with it.
+uint32_t Refresh();
 std::string Describe();
 // The id this process believes it is (host = 0; client learns it from the host's WELCOME).
 int LocalId();

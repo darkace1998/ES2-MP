@@ -113,7 +113,6 @@ RVAS = {
     'AESPlayerController_InputChargeCruiseModeReleased': 'private: void __cdecl AESPlayerController::InputChargeCruiseModeReleased(void)',
     # Main-menu multiplayer UI: create an ES2 menu button, label it, and splice it into the menu's
     # own VerticalBox so it looks and behaves like a stock entry.
-    'UWidgetBlueprintLibrary_Create': 'public: static class UUserWidget * __cdecl UWidgetBlueprintLibrary::Create(class UObject *, class TSubclassOf<class UUserWidget>, class APlayerController *)',
     'UPanelWidget_RemoveChild': 'public: bool __cdecl UPanelWidget::RemoveChild(class UWidget *)',
     'UPanelWidget_AddChild': 'public: class UPanelSlot * __cdecl UPanelWidget::AddChild(class UWidget *, class UPanelSlot *)',
     'FText_FromString': 'public: static class FText __cdecl FText::FromString(class FString const &)',
@@ -180,7 +179,6 @@ RVAS = {
     'UGameplayLib_ESOpenLevel': 'public: static void __cdecl UGameplayLib::ESOpenLevel(class UObject const *, class FName, bool, class FString)',
     'UESGameInstance_PushPause': 'public: static void __cdecl UESGameInstance::PushPause(void)',
     'UESGameInstance_PopPause': 'public: static void __cdecl UESGameInstance::PopPause(void)',
-    'AESPawn_PostInitializeComponents': 'public: virtual void __cdecl AESPawn::PostInitializeComponents(void)',
     'UGameplayLib_GetESPlayerPawn': 'public: static class AESPawn * __cdecl UGameplayLib::GetESPlayerPawn(class UObject const *)',
     'UGameplayLib_GetESPlayerController': 'public: static class AESPlayerController * __cdecl UGameplayLib::GetESPlayerController(class UObject const *)',
     'UGameplayLib_GetPlayerData': 'public: static class UPlayerData * __cdecl UGameplayLib::GetPlayerData(void)',
@@ -206,10 +204,8 @@ RVAS = {
     'UScriptStruct_DestroyStruct': 'public: virtual void __cdecl UScriptStruct::DestroyStruct(void *, int) const',
     'UScriptStruct_ExportText': 'public: void __cdecl UScriptStruct::ExportText(class FString &, void const *, void const *, class UObject *, int, class UObject *, bool) const',
     'UScriptStruct_ImportText': 'public: wchar_t const * __cdecl UScriptStruct::ImportText(wchar_t const *, void *, class UObject *, int, class FOutputDevice *, class FString const &, bool) const',
-    'UGameplayLib_GetPlayerData': 'public: static class UPlayerData * __cdecl UGameplayLib::GetPlayerData(void)',
     'UGameplayLib_RefreshPlayerShipData': 'public: static void __cdecl UGameplayLib::RefreshPlayerShipData(void)',
     'AController_UnPossess': 'public: virtual void __cdecl AController::UnPossess(void)',
-    'AController_Possess': 'public: virtual void __cdecl AController::Possess(class APawn *)',
     'AESHUD_Tick': 'public: virtual void __cdecl AESHUD::Tick(float)',
     'AESGameModeBase_GetESGameMode': 'regex:^public: static class AESGameModeBase \\* __cdecl AESGameModeBase::GetESGameMode\\(.*$',
 }
@@ -254,7 +250,6 @@ OFFSETS = {
     'APlayerState': ['PlayerId', 'PlayerNamePrivate', 'bIsABot', 'bOnlySpectator', 'UniqueId'],
     'AGameSession': ['MaxSpectators', 'MaxPlayers', 'MaxPartySize'],
     'AGameModeBase': ['GameSessionClass', 'GameStateClass', 'PlayerControllerClass', 'PlayerStateClass', 'HUDClass', 'DefaultPawnClass', 'SpectatorClass', 'ReplaySpectatorPlayerControllerClass', 'ServerStatReplicatorClass', 'GameSession', 'GameState', 'OptionsString', 'bUseSeamlessTravel', 'bStartPlayersAsSpectators', 'bPauseable'],
-    'UActorComponent_XX': ['OwnerPrivate'],
     'UNetDriver': ['GuidCache', 'NetDriverName', 'ClientConnections', 'ServerConnection', 'World', 'NetConnectionClass', 'MaxInternetClientRate', 'MaxClientRate', 'ServerTravelPause', 'ElapsedTime', 'NetServerMaxTickRate'],
     'UNetConnection': ['Children', 'Driver', 'PackageMap', 'OpenChannels', 'SentTemporaries', 'ViewTarget', 'OwningActor', 'MaxPacket', 'PlayerController', 'URL', 'LastReceiveTime', 'ClientLoginState', 'PlayerId'],
     'FURL': ['Protocol', 'Host', 'Port', 'Valid', 'Map', 'RedirectURL', 'Op', 'Portal'],
@@ -270,6 +265,8 @@ OFFSETS = {
     'AESGameModeBase': ['ESPlayerPawn', 'ESPlayerController', 'PlayerData'],
     'UESGameInstance': ['bUseWorldOriginShifting', 'WorldOriginShiftingStack'],
     'FOnlineSubsystemSteam': ['bSteamworksClientInitialized', 'SessionInterface', 'IdentityInterface'],
+    'FUniqueNetIdSteam': ['UniqueNetId'],
+    'USteamNetDriver': ['bIsPassthrough'],
     'UShipMovementComponent': ['MaxSpeedBackward', 'MaxSpeedStrafe', 'MaxSpeedHover'],
     'FBuffableFloat': ['BaseValue', 'CurrentValue'],
     'UPlayerData': ['Ships', 'ShipsSaveState', 'CurrentShip', 'CompletedMissions', 'TrackedMainMission', 'TrackedSideMission', 'TrackedJob', 'Credits', 'PlayerLevel', 'XP'],
@@ -297,7 +294,6 @@ OFFSETS = {
     'FConsumableInfo': ['ConsumableItem', 'ConsumableClass', 'DefaultConsumableObject'],
     'UInventory': ['PrimaryWeapons', 'SecondaryWeapons', 'EnergyCores', 'Sensors', 'Shields', 'CargoUnits', 'Platings', 'Thrusters', 'Devices', 'Consumables', 'Cargo'],
     'FShipData': ['Name', 'Inventory', 'ShipItemInstance', 'UltimateDevice'],
-    'UShipMovementComponent': [],
 }
 BITFIELDS = {  # class -> bitfield members  (adds <m>_off and <m>_mask)
     'FActorSpawnParameters': ['bRemoteOwned', 'bNoFail', 'bDeferConstruction', 'bAllowDuringConstructionScript'],
@@ -316,6 +312,23 @@ def load_symbols(path):
             syms.append((int(parts[0], 16), parts[1], parts[2], parts[3]))
     return syms
 
+def check_duplicate_keys():
+    """A repeated key in RVAS/OFFSETS/BITFIELDS keeps only the last literal: 'UShipMovementComponent'
+    once appeared twice and its three offsets silently vanished from offsets.h. Parse our own source."""
+    import ast
+    tree = ast.parse(open(__file__).read())
+    dups = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Dict): continue
+        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if not names or names[0] not in ('RVAS', 'OFFSETS', 'BITFIELDS'): continue
+        seen = set()
+        for k in node.value.keys:
+            if isinstance(k, ast.Constant):
+                if k.value in seen: print(f'ERROR: duplicate key {k.value!r} in {names[0]}', file=sys.stderr); dups += 1
+                seen.add(k.value)
+    return dups
+
 def main():
     symbols_tsv, types_txt, outdir = sys.argv[1:4]
     os.makedirs(outdir, exist_ok=True)
@@ -327,7 +340,7 @@ def main():
         if kind == 'function': rva_count[rva] = rva_count.get(rva, 0) + 1
     lines = ['// AUTO-GENERATED by tools/gen_sdk.py from ES2-Win64-Shipping.pdb — do not edit', '#pragma once', '#include <cstdint>',
              'namespace es2rva {', f'  constexpr uint32_t PE_TIMESTAMP = 4225050077u; // ES2-Win64-Shipping.exe build id guard']
-    errors = 0
+    errors = check_duplicate_keys()
     for ident, sig in RVAS.items():
         if sig.startswith('regex:'):
             rx = re.compile(sig[6:])
@@ -359,7 +372,7 @@ def main():
     for cls, members in OFFSETS.items():
         r = db.resolve_def(cls)
         if r is None:
-            print(f'WARNING: class {cls} not found', file=sys.stderr); continue
+            print(f'ERROR: class {cls} not found', file=sys.stderr); errors += 1; continue
         lay = db.layout(cls)
         bym = {}
         for off, sz, tn, nm, owner in lay:
@@ -368,12 +381,12 @@ def main():
         out.append(f'    constexpr uint32_t __size = {r["size"]};')
         for m in members:
             if m not in bym:
-                print(f'WARNING: {cls}::{m} not found', file=sys.stderr); out.append(f'    // MISSING {m}'); continue
+                print(f'ERROR: {cls}::{m} not found', file=sys.stderr); errors += 1; out.append(f'    // MISSING {m}'); continue
             off, sz, tn, owner = bym[m]
             out.append(f'    constexpr uint32_t {m} = 0x{off:X}; // {tn} (size {sz}) from {owner}')
         for m in BITFIELDS.get(cls, []):
             if m not in bym:
-                print(f'WARNING: {cls}::{m} bitfield not found', file=sys.stderr); out.append(f'    // MISSING bitfield {m}'); continue
+                print(f'ERROR: {cls}::{m} bitfield not found', file=sys.stderr); errors += 1; out.append(f'    // MISSING bitfield {m}'); continue
             off, sz, tn, owner = bym[m]
             mm = re.search(r': (\d+) @bit(\d+)', tn)
             if not mm:

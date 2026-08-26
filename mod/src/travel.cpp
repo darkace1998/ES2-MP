@@ -79,16 +79,29 @@ static constexpr double kDockReturnSettle = 10.0;   // let the location finish c
 static double g_reconnectDelay = 18.0;   // the host needs ~15s to load the new location and re-listen
 
 // ---------------------------------------------------------------- world origin shifting
+// What bUseWorldOriginShifting was before a session switched it off, so single-player gets it back when
+// the session ends (it used to stay off for the rest of the process). The refcount stack is not
+// restored: ES2 pushes and pops it itself as it goes.
+static bool g_originCfgSaved = false;
+static bool g_originCfgWas = false;
+
 void ApplyOriginShiftPolicy(bool multiplayer) {
     UGameInstance* gi = GetGameInstance();
     if (!gi || !g_disableOriginShift) return;
     int& stack = UE_FIELD(int32_t, gi, es2off::UESGameInstance::WorldOriginShiftingStack);
     bool& cfg = UE_FIELD(bool, gi, es2off::UESGameInstance::bUseWorldOriginShifting);
     if (multiplayer) {
+        if (!g_originCfgSaved) { g_originCfgSaved = true; g_originCfgWas = cfg; }
         if (stack != 0 || cfg) {
             LOGF("[travel] world origin shifting OFF for multiplayer (stack %d -> 0, cfg %d -> 0)", stack, (int)cfg);
             stack = 0;
             cfg = false;
+        }
+    } else if (g_originCfgSaved) {
+        g_originCfgSaved = false;
+        if (cfg != g_originCfgWas) {
+            LOGF("[travel] world origin shifting restored for single-player (cfg %d -> %d)", (int)cfg, (int)g_originCfgWas);
+            cfg = g_originCfgWas;
         }
     }
 }
@@ -217,6 +230,15 @@ void Tick(float dt, bool isHost) {
         }
         if (g_now < g_reconnectAt) return;
         if (g_hostAddr.empty()) { g_reconnectAt = 0; return; }
+        // Same rule as the docking path above: a travel to a host out of the main menu crashes ES2, so
+        // if the host's teardown bounced us to the front end the reconnect is off, not attempted. In
+        // transit (no world / the transition map) just wait for the next tick.
+        if (!w || world == "EmptyTransitionMap") return;
+        if (world == "Map_MainMenu") {
+            LOGF("[travel] back at the main menu while a reconnect to %s was armed — not reconnecting from here", g_hostAddr.c_str());
+            g_reconnectAt = 0; g_reconnectTries = 0;
+            return;
+        }
         if (++g_reconnectTries > 8) { LOGF("[travel] giving up reconnecting to %s", g_hostAddr.c_str()); g_reconnectAt = 0; g_reconnectTries = 0; return; }
         LOGF("[travel] reconnecting to %s (try %d)", g_hostAddr.c_str(), g_reconnectTries);
         ExecConsoleCommand("open " + g_hostAddr);

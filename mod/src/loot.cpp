@@ -18,6 +18,7 @@
 #include <windows.h>
 #include <cstdlib>
 #include <cstdio>
+#include <vector>
 
 using namespace ue;
 using es2coop::Format;
@@ -40,8 +41,22 @@ static bool g_applying = false;          // client: we are spawning a mirrored p
 static int g_spawnDepth = 0;
 struct SpawnScope { SpawnScope() { ++g_spawnDepth; } ~SpawnScope() { --g_spawnDepth; } bool outermost() const { return g_spawnDepth == 1; } };
 static uint64_t g_sent = 0, g_applied = 0, g_skipped = 0;
+// Client: drops announced by the host, waiting for the tick. Spawning a pickup runs its Blueprint
+// (construction script, BeginPlay), which must never happen inside the net receive path OnClientOp is
+// called on -- the same rule every other mirrored effect in the mod follows.
+struct PendingDrop { std::string tid; int level; int amount; FVector loc; };
+static std::vector<PendingDrop> g_pending;
 
 // ---------------------------------------------------------------- helpers
+// The item a pickup carries: APickupBase::PickupEntry.PickupInventory -> first cargo item.
+static UObject* PickupItem(AActor* pickup) {
+    if (!pickup || !IsValidObject((UObject*)pickup)) return nullptr;
+    UObject* inv = UE_FIELD(UObject*, pickup, es2off::APickupBase::PickupEntry + es2off::FPickupEntry::PickupInventory);
+    if (!inv || !IsValidObject(inv)) return nullptr;
+    UObject* item = Rva<std::remove_pointer_t<Fn_GetFirstCargoItem>>(es2rva::UInventory_GetFirstCargoItem)(inv);
+    return (item && IsValidObject(item)) ? item : nullptr;
+}
+
 static void BroadcastItem(UObject* item, const FVector& loc) {
     if (!item || !IsValidObject(item)) return;
     std::string tid = UE_FIELD(FName, item, es2off::UItem::ItemTemplateID).ToString();
@@ -65,8 +80,11 @@ static AActor* H_SpawnPickupFromItemID(UObject* wco, FName itemId, const FVector
         std::string tid = itemId.ToString();
         if (tid.empty() || tid == "None") ++g_skipped;
         else {
+            // The generated item knows how many it stands for (ore drops stack); the id alone does not.
+            int amount = 1;
+            if (UObject* item = PickupItem(r)) { int n = UE_FIELD(int32_t, item, es2off::UItem::Amount); if (n > 0) amount = n; }
             ++g_sent;
-            coop::SendToAllClients(Format("LOOT|%s|%d|%d|%.1f|%.1f|%.1f", tid.c_str(), level, 1,
+            coop::SendToAllClients(Format("LOOT|%s|%d|%d|%.1f|%.1f|%.1f", tid.c_str(), level, amount,
                                           loc->X, loc->Y, loc->Z));
         }
     }
@@ -90,11 +108,8 @@ static bool H_SpawnPickups(UObject* wco, const void* entries, const FVector* loc
     if (!out.Data || out.Num <= 0 || out.Num > 512) return r;
     for (int i = 0; i < out.Num; ++i) {
         AActor* p = out.Data[i];
-        if (!p || !IsValidObject((UObject*)p)) continue;
-        // APickupBase::PickupEntry(+0x378).PickupInventory(+0x10) -> first cargo item
-        UObject* inv = UE_FIELD(UObject*, p, es2off::APickupBase::PickupEntry + es2off::FPickupEntry::PickupInventory);
-        if (!inv || !IsValidObject(inv)) continue;
-        UObject* item = Rva<std::remove_pointer_t<Fn_GetFirstCargoItem>>(es2rva::UInventory_GetFirstCargoItem)(inv);
+        UObject* item = PickupItem(p);
+        if (!item) continue;
         FTransform t = GetActorTransform(p);
         BroadcastItem(item, t.Translation);
     }
@@ -109,22 +124,37 @@ bool OnClientOp(const std::string& op, const std::string& body) {
     int level = 0, amount = 1;
     double x = 0, y = 0, z = 0;
     if (sscanf(body.c_str(), "%127[^|]|%d|%d|%lf|%lf|%lf", tid, &level, &amount, &x, &y, &z) < 6) return true;
-    UWorld* w = GetWorld();
-    if (!w) return true;
-    FVector loc{x, y, z};
-    FRotator rot{};
-    bool ok = false;
-    g_applying = true;
-    AActor* p = Rva<std::remove_pointer_t<Fn_SpawnPickupFromItemID>>(es2rva::UGameplayLib_SpawnPickupFromItemID)(
-        (UObject*)w, FName::Make(std::string(tid)), &loc, level, &rot, &ok);
-    g_applying = false;
-    if (p) SetActorTransform(p, [&]{ FTransform t = GetActorTransform(p); t.Translation = loc; return t; }(), false, 1);
-    if (p) ++g_applied;
-    static int logged = 0;
-    if (logged++ < 12)
-        LOGF("[loot] mirrored '%s' lvl %d x%d at (%.0f %.0f %.0f) -> %s", tid, level, amount, x, y, z,
-             p ? GetName((UObject*)p).c_str() : "FAILED");
+    if (g_pending.size() < 256) g_pending.push_back(PendingDrop{tid, level, amount, FVector{x, y, z}});
     return true;
+}
+
+// Client, on the game thread: spawn our own copy of each announced drop through the vanilla path.
+void ClientTick() {
+    if (g_pending.empty()) return;
+    std::vector<PendingDrop> due;
+    due.swap(g_pending);
+    UWorld* w = GetWorld();
+    if (!w) return;
+    for (const PendingDrop& d : due) {
+        FVector loc = d.loc;
+        FRotator rot{};
+        bool ok = false;
+        g_applying = true;
+        AActor* p = Rva<std::remove_pointer_t<Fn_SpawnPickupFromItemID>>(es2rva::UGameplayLib_SpawnPickupFromItemID)(
+            (UObject*)w, FName::Make(d.tid), &loc, d.level, &rot, &ok);
+        g_applying = false;
+        if (p) {
+            SetActorTransform(p, [&]{ FTransform t = GetActorTransform(p); t.Translation = loc; return t; }(), false, 1);
+            // A stacked drop (ore) is one pickup carrying N: the id-based spawn generates a single one,
+            // so put the host's count on the generated item. This is the same field BroadcastItem reads.
+            if (d.amount > 1) if (UObject* item = PickupItem(p)) UE_FIELD(int32_t, item, es2off::UItem::Amount) = d.amount;
+            ++g_applied;
+        }
+        static int logged = 0;
+        if (logged++ < 12)
+            LOGF("[loot] mirrored '%s' lvl %d x%d at (%.0f %.0f %.0f) -> %s", d.tid.c_str(), d.level, d.amount,
+                 loc.X, loc.Y, loc.Z, p ? GetName((UObject*)p).c_str() : "FAILED");
+    }
 }
 
 // ---------------------------------------------------------------- commands

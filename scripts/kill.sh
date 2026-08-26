@@ -7,9 +7,13 @@
 # session then binds a different port and the harness talks to a stale instance.
 PAT='(ES2-Win64-Shipping|Everspace2)\.exe'
 me=$$
-mine() { # true if pid is this script, its parent, or another copy of this script
+mine() { # true if pid is this script, its parent, another copy of this script, or tooling that merely names the exe
   [[ "$1" == "$me" || "$1" == "$PPID" ]] && return 0
-  tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null | grep -q 'kill\.sh'
+  local cmd; cmd=$(tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null)
+  [[ "$cmd" == *kill.sh* ]] && return 0
+  # pgrep -f matches the whole command line: a concurrent `llvm-objdump ... ES2-Win64-Shipping.exe`
+  # (tools/disasm.py) or a python harness quoting the path is not a game instance.
+  [[ "$cmd" =~ ^([^ ]*/)?(python[0-9.]*|llvm-[A-Za-z0-9-]+|grep|sed|bash|sh)\  ]]
 }
 for sig in TERM KILL; do
   n=0

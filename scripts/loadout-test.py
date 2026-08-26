@@ -25,7 +25,8 @@ def main():
     time.sleep(8)
     pl = con(27100, 'players')
     print(pl)
-    m = {int(a): b for a, b in re.findall(r'\[(\d+)\]\s+\S+\s+\S+\s+pc=\S+\s+pawn=(\S+)', pl)}
+    # The name column is a Steam persona (spaces and brackets are routine), so never \S+ for it.
+    m = {int(a): b for a, b in re.findall(r'\[(\d+)\]\s+.*?\s+(?:local|remote)\s+pc=\S+\s+pawn=(\S+)', pl)}
     acts = con(27100, 'actors ESPawn 60')
     addr = {}
     for line in acts.split('\n'):

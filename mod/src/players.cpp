@@ -92,6 +92,19 @@ Player* RegisterLocalAs(APlayerController* pc, int id) {
     return &p;
 }
 
+Player* RegisterRemoteAs(int id, AActor* pawn) {
+    if (id < 0 || id >= kMaxPlayers || !pawn) return nullptr;
+    std::lock_guard<std::mutex> lk(g_mutex);
+    Player& p = g_slots[id];
+    if (p.alive && p.local) return nullptr;              // never overwrite our own slot
+    std::string keepName = p.alive ? p.name : std::string();
+    p = Player{};
+    p.id = id; p.pawn = pawn; p.local = false; p.alive = true;
+    p.name = keepName.empty() ? Format("player%d", id) : keepName;
+    LOGF("[players] remote player id=%d seen through pawn %s", id, GetName((UObject*)pawn).c_str());
+    return &p;
+}
+
 void SetPruneDeparted(bool on) { g_prune = on; }
 bool PruneDeparted() { return g_prune; }
 
@@ -102,11 +115,23 @@ void UnregisterController(APlayerController* pc) {
         p = Player{};
     }
 }
+void UnregisterId(int id) {
+    if (id < 0 || id >= kMaxPlayers) return;
+    std::lock_guard<std::mutex> lk(g_mutex);
+    Player& p = g_slots[id];
+    if (p.alive && !p.local) { LOGF("[players] -%s id=%d", p.name.c_str(), p.id); p = Player{}; }
+}
 
-void Refresh() {
+uint32_t Refresh() {
+    uint32_t freed = 0;
     for (auto& p : g_slots) {
         if (!p.alive) continue;
-        if (!IsValidObject((UObject*)p.pc)) { LOGF("[players] id=%d controller went away", p.id); p = Player{}; continue; }
+        if (!p.pc) {
+            // A client-side entry for another player: it lives exactly as long as the pawn it names.
+            if (!IsValidObject((UObject*)p.pawn)) { LOGF("[players] id=%d remote pawn went away", p.id); freed |= 1u << p.id; p = Player{}; }
+            continue;
+        }
+        if (!IsValidObject((UObject*)p.pc)) { LOGF("[players] id=%d controller went away", p.id); freed |= 1u << p.id; p = Player{}; continue; }
         // A disconnected client's controller stays readable until the next GC, so IsValidObject (which
         // deliberately means "dereferenceable", not "not pending-kill") keeps its slot alive for seconds
         // after it left. That matters because ES2 players disconnect and rejoin constantly under solo
@@ -114,11 +139,13 @@ void Refresh() {
         // cycles would walk off the end of the 4-slot registry. Pending-kill is the right test here.
         if (!p.local && g_prune && IsGarbage((UObject*)p.pc)) {
             LOGF("[players] id=%d disconnected (controller pending-kill) — freeing the slot", p.id);
+            freed |= 1u << p.id;
             p = Player{}; continue;
         }
         p.pawn = UE_FIELD(AActor*, p.pc, es2off::AController::Pawn);
         if (p.pawn && !IsValidObject((UObject*)p.pawn)) p.pawn = nullptr;
     }
+    return freed;
 }
 
 std::string Describe() {

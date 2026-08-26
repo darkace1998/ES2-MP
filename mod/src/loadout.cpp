@@ -92,9 +92,14 @@ static std::string g_tweakFrom, g_tweakTo;   // provenance test: rewrite the blo
 static std::map<int, std::string> g_recvBuf;
 // host-side respawn scheduling: a client's ship blob only arrives after its pawn was already spawned,
 // so once it lands we rebuild that player's pawn with the substitution armed.
-struct Respawn { double at = 0; bool armed = false; };
+struct Respawn { double at = 0; bool armed = false; int tries = 0; };
 static std::map<int, Respawn> g_respawn;
 static std::map<int, bool> g_applied;
+// Who the stash in each slot belongs to (see OnPlayerJoined).
+static std::map<int, std::string> g_stashOwner;
+// Set by EndSubstitution: did the spawn that just finished actually take the substitute ship?
+static bool g_lastSpawnSubstituted = false;
+static constexpr int kRespawnTries = 20;          // ~10 s of retries before a respawn attempt is dropped
 // The client's own hull/armour condition, parsed out of its blob (see ApplyClientCondition).
 struct Condition { float health = -1.f, armor = -1.f; };
 static std::map<int, Condition> g_condition;
@@ -179,6 +184,7 @@ bool BeginSubstitution(int playerId) {
     }
     g_substituting = playerId;
     g_subCalls = 0;
+    g_lastSpawnSubstituted = false;
     LOGF("[loadout] player %d: ship state imported, substituting for this spawn", playerId);
     return true;
 }
@@ -189,6 +195,7 @@ void EndSubstitution() {
         g_subState.clear();
     }
     if (g_substituting >= 0) LOGF("[loadout] substitution for player %d ended after %llu call(s)", g_substituting, (unsigned long long)g_subCalls);
+    g_lastSpawnSubstituted = g_subCalls > 0;
     g_substituting = -1;
 }
 
@@ -306,11 +313,23 @@ void LocalShipSpeedTick() {
 }
 
 
-void OnPlayerJoined(int playerId) {
+void OnPlayerJoined(int playerId, const std::string& identity) {
     g_applied.erase(playerId);
     g_respawn.erase(playerId);
     g_recvBuf.erase(playerId);
-    g_condition.erase(playerId);
+    // The stash is kept across a rejoin on purpose (docking is a disconnect + reconnect and the ship has
+    // not changed), but a slot is also what the NEXT player to join gets: with the previous occupant's
+    // blob still in it, they spawned in that player's ship until their own arrived -- or for good, if it
+    // never did. So the stash belongs to an identity, not a slot.
+    auto owner = g_stashOwner.find(playerId);
+    const bool sameOwner = owner != g_stashOwner.end() && !identity.empty() && owner->second == identity;
+    if (!sameOwner && g_stash.count(playerId)) {
+        LOGF("[loadout] player %d: slot reused by a different player (%s) — dropping the previous occupant's ship",
+             playerId, identity.empty() ? "unknown identity" : identity.c_str());
+        g_stash.erase(playerId);
+        g_condition.erase(playerId);
+    }
+    if (!identity.empty()) g_stashOwner[playerId] = identity;
     LOGF("[loadout] player %d (re)joined — their ship will be applied again", playerId);
 }
 
@@ -379,11 +398,24 @@ static bool LooksLikeOurShip(AActor* pawn) {
 // Weapons only appeared to work because the mod rebuilds those explicitly (ClientBuildWeaponsTick).
 // H_PreInitComponents below is the earliest point that fixes all three through the vanilla path;
 // this PostInit hook stays as a backstop and no-ops once ShipItemInstance is set.
+// INSTRUMENTATION for an open question. LooksLikeOurShip is a class-flag test, and at PreInitialize
+// time nothing distinguishes our own incoming pawn from ANOTHER player's replicated pawn (both are
+// remote-owned SimulatedProxy at that point; ours only becomes AutonomousProxy on possession). So the
+// fill above may also be putting this client's ship into the host's remote pawn -- which would run
+// ES2's singleton "player ship" init on it, the very mechanism docs/NOTES.md blames for the speed-stat
+// theft. Not changed blind: filling the wrong pawn is a hypothesis, breaking our own would be certain.
+// Every pawn we fill is remembered, and BeginPlay (where the role IS known) counts the ones that turned
+// out not to be ours: `shipdata local` -> remoteFilled. A non-zero count confirms it.
+static std::vector<AActor*> g_filledPawns;
+static uint64_t g_remoteFilled = 0;
+static void NoteFilled(AActor* pawn) { if (g_filledPawns.size() < 64) g_filledPawns.push_back(pawn); }
+
 static void H_PostInitComponents(AActor* pawn) {
     if (pawn && coop::CurrentRole() == coop::Role::Client && g_autoLocalShip && LooksLikeOurShip(pawn)) {
         void* sd = reinterpret_cast<char*>(pawn) + es2off::AESPawn::ShipData;
         if (UE_FIELD(UObject*, sd, es2off::FShipData::ShipItemInstance) == nullptr && CopyOwnShipInto(pawn)) {
             ++g_prePostInit;
+            NoteFilled(pawn);
             LOGF("[loadout] filled our own ShipData on %s before PostInitializeComponents", GetName((UObject*)pawn).c_str());
         }
     }
@@ -400,6 +432,7 @@ static void H_PreInitComponents(AActor* pawn) {
         void* sd = reinterpret_cast<char*>(pawn) + es2off::AESPawn::ShipData;
         if (UE_FIELD(UObject*, sd, es2off::FShipData::ShipItemInstance) == nullptr && CopyOwnShipInto(pawn)) {
             ++g_prePreInit;
+            NoteFilled(pawn);
             LOGF("[loadout] filled our own ShipData on %s before PreInitializeComponents", GetName((UObject*)pawn).c_str());
         }
     }
@@ -413,6 +446,16 @@ static void H_BeginPlay(AActor* pawn) {
         uint8_t role = UE_FIELD(uint8_t, pawn, es2off::AActor::Role);
         void* sd = reinterpret_cast<char*>(pawn) + es2off::AESPawn::ShipData;
         bool empty = UE_FIELD(UObject*, sd, es2off::FShipData::ShipItemInstance) == nullptr;
+        for (auto it = g_filledPawns.begin(); it != g_filledPawns.end(); ++it) {
+            if (*it != pawn) continue;
+            g_filledPawns.erase(it);
+            if (role != 2) {
+                ++g_remoteFilled;
+                LOGF("[loadout] NOTE: %s was filled with OUR ship but is role %d (not our own pawn) — see `shipdata local` remoteFilled",
+                     GetName((UObject*)pawn).c_str(), (int)role);
+            }
+            break;
+        }
         if (role == 2 /*ROLE_AutonomousProxy = our own ship*/ && empty) {
             if (CopyOwnShipInto(pawn)) {
                 ++g_preBeginPlay;
@@ -567,7 +610,10 @@ static bool StartSend() {
     g_pendingSend = text;
     g_sendOffset = 0;
     g_sendSeq = 0;
-    g_sendTotal = (int)((text.size() + kChunk - 1) / kChunk);
+    // Upper bound: a chunk may be cut a few bytes short at a UTF-8 boundary, and the host only needs
+    // `seq + 1 >= total` to know the last one has landed, so counting exact chunks is not required --
+    // but the count must never be LOWER than what is sent, or the host stashes a truncated blob.
+    g_sendTotal = (int)((text.size() + (kChunk - 4) - 1) / (kChunk - 4));
     LOGF("[loadout] sending ship: %zu chars in %d chunks", text.size(), g_sendTotal);
     return true;
 }
@@ -584,7 +630,13 @@ void ClientTick(float dt) {
     for (int i = 0; i < g_chunksPerTick && g_sendOffset < g_pendingSend.size(); ++i) {
         size_t n = g_pendingSend.size() - g_sendOffset;
         if (n > kChunk) n = kChunk;
-        coop::SendToServer(Format("SD|%d|%d|", g_sendSeq, g_sendTotal) + g_pendingSend.substr(g_sendOffset, n));
+        // The blob is UTF-8 and each chunk is re-decoded on both sides; never cut inside a multi-byte
+        // sequence (back off to the character boundary -- a continuation byte is 10xxxxxx).
+        if (g_sendOffset + n < g_pendingSend.size())
+            while (n > 1 && ((unsigned char)g_pendingSend[g_sendOffset + n] & 0xC0) == 0x80) --n;
+        // Nothing goes out without a local controller; advancing anyway sent the host a blob with a hole
+        // in it (ImportText then failed) while this side logged "ship sent".
+        if (!coop::SendToServer(Format("SD|%d|%d|", g_sendSeq, g_sendTotal) + g_pendingSend.substr(g_sendOffset, n))) break;
         g_sendOffset += n;
         ++g_sendSeq;
     }
@@ -625,6 +677,7 @@ bool OnClientOp(const std::string& op, const std::string& body) {
 // Host: rebuild a player's pawn now that we have their real ship.
 using Fn_RestartPlayer = void (*)(void* gameMode, void* controller);
 using Fn_UnPossess = void (*)(void* controller);
+using Fn_Possess = void (*)(void* controller, AActor* pawn);
 // ---------------------------------------------------------------- HUD rebinding
 //
 // ES2's ingame HUD widget is created under the GameInstance, not the pawn, so it outlives both a
@@ -739,6 +792,9 @@ static bool CallNameFn(UObject* obj, const char* fnName, FName* inOut, bool isSe
     if (!fn) return false;
     std::vector<char> parms(UE_FIELD(uint16_t, fn, es2off::UFunction::ParmsSize) + 16, 0);
     for (auto& p : GetProperties((UStruct*)fn, false)) {
+        // A UFunction's property list also holds its LOCAL variables, past ParmsSize: only CPF_Parm
+        // properties are part of the block (a Blueprint local FName first would have been written to).
+        if (!(p.Flags & 0x80 /*CPF_Parm*/)) continue;
         const bool isReturn = (p.Flags & 0x400 /*CPF_ReturnParm*/) != 0;
         if (isSetter == isReturn || p.TypeName != "NameProperty") continue;
         if (isSetter) *(FName*)(parms.data() + p.Offset) = *inOut;
@@ -803,7 +859,20 @@ void HostTick(float dt) {
         int id = it->first;
         players::Player* pl = players::ById(id);
         AGameModeBase* gm = GetGameMode(GetWorld());
-        if (pl && pl->pc && gm) {
+        // Not now (slot mid-refresh, controller not there, world in transition): retry, bounded. This
+        // used to drop the entry outright, and the client then kept the placeholder for good.
+        auto retryLater = [&](const char* why) {
+            if (++it->second.tries >= kRespawnTries) {
+                LOGF("[loadout] player %d: giving up on the loadout respawn (%s)", id, why);
+                it = g_respawn.erase(it);
+            } else {
+                it->second.at = g_hostNow + 0.5;
+                ++it;
+            }
+        };
+        if (!pl || !pl->pc || !gm) { retryLater(!gm ? "no game mode" : "no player/controller"); continue; }
+        if (!HasStash(id)) { LOGF("[loadout] player %d: nothing stashed to respawn with", id); it = g_respawn.erase(it); continue; }
+        {
             // Spawn + possess the new ship FIRST, then retire the placeholder: the controller must never
             // be left without a pawn, or the client's HUD tick faults.
             AActor* oldPawn = UE_FIELD(AActor*, pl->pc, es2off::AController::Pawn);
@@ -811,10 +880,20 @@ void HostTick(float dt) {
             // AGameModeBase::RestartPlayerAtTransform only spawns when the controller has NO pawn
             // (`if (NewPlayer->GetPawn() == nullptr && ...)`), so unpossess first. Both calls happen in
             // this one frame, so nothing ticks while the controller is pawn-less.
+            g_lastSpawnSubstituted = false;
             if (oldPawn) Rva<std::remove_pointer_t<Fn_UnPossess>>(es2rva::AController_UnPossess)(pl->pc);
             Rva<std::remove_pointer_t<Fn_RestartPlayer>>(es2rva::AGameModeBase_RestartPlayer)(gm, pl->pc);
             AActor* newPawn = UE_FIELD(AActor*, pl->pc, es2off::AController::Pawn);
-            if (newPawn && newPawn != oldPawn && oldPawn && IsValidObject((UObject*)oldPawn)) {
+            if (!newPawn) {
+                // RestartPlayer produced nothing: the controller is pawn-less, which is the one state
+                // this must never leave behind. Put the placeholder back and try again later.
+                if (oldPawn && IsValidObject((UObject*)oldPawn))
+                    Rva<std::remove_pointer_t<Fn_Possess>>(es2rva::AController_Possess)(pl->pc, oldPawn);
+                LOGF("[loadout] player %d: RestartPlayer produced no pawn — re-possessed %s", id, GetName((UObject*)oldPawn).c_str());
+                retryLater("RestartPlayer produced no pawn");
+                continue;
+            }
+            if (newPawn != oldPawn && oldPawn && IsValidObject((UObject*)oldPawn)) {
                 UFunction* destroy = FindFunction((UObject*)oldPawn, "K2_DestroyActor");
                 if (destroy) ProcessEvent((UObject*)oldPawn, destroy, nullptr);
                 LOGF("[loadout] player %d: placeholder retired, now flying %s", id, GetName((UObject*)newPawn).c_str());
@@ -842,7 +921,12 @@ void HostTick(float dt) {
             } else {
                 LOGF("[loadout] player %d: restart produced pawn=%s (old=%s)", id, GetName((UObject*)newPawn).c_str(), GetName((UObject*)oldPawn).c_str());
             }
-            g_applied[id] = true;
+            // "Applied" only when the spawner actually took the substitute. A failed import (blob
+            // truncated / mismatched build) still respawns -- into another placeholder -- and marking
+            // that as applied made the client fly the host's ship until it died.
+            g_applied[id] = g_lastSpawnSubstituted;
+            if (!g_lastSpawnSubstituted)
+                LOGF("[loadout] player %d: the spawn did NOT take their ship (import failed?) — will apply again on the next blob", id);
         }
         it = g_respawn.erase(it);
     }
@@ -914,10 +998,10 @@ static void CmdShipData(const console::Args& a, std::string& out) {
         if (a.size() > 2 && a[2] == "auto") { g_autoLocalShip = a.size() > 3 ? a[3] == "1" : true; }
         else if (a.size() > 2 && a[2] == "build") { std::string log; int n = BuildWeaponsLocally(pawn, log); out += log + Format("filled %d slot(s)\n", n); }
         else out += ApplyOwnShipLocally(pawn, err) ? "applied our own ship to the local pawn\n" : ("failed: " + err + "\n");
-        out += Format("autoLocalShip=%d applied=%llu prePreInit=%llu prePostInit=%llu preBeginPlay=%llu localShipEmpty=%d\n", (int)g_autoLocalShip,
+        out += Format("autoLocalShip=%d applied=%llu prePreInit=%llu prePostInit=%llu preBeginPlay=%llu localShipEmpty=%d remoteFilled=%llu\n", (int)g_autoLocalShip,
                       (unsigned long long)g_localApplied, (unsigned long long)g_prePreInit,
                       (unsigned long long)g_prePostInit,
-                      (unsigned long long)g_preBeginPlay, (int)LocalShipIsEmpty(pawn));
+                      (unsigned long long)g_preBeginPlay, (int)LocalShipIsEmpty(pawn), (unsigned long long)g_remoteFilled);
     } else if (sub == "stash") {
         out += Format("  repairOnJoin=%d | host speeds %.0f/%.0f/%.0f restored=%llu\n", (int)g_repairOnJoin,
                       g_hostSpeed[0], g_hostSpeed[1], g_hostSpeed[2], (unsigned long long)g_speedRestored);
@@ -1086,14 +1170,17 @@ void MaybeSendOnJoin() {
 }
 void ResetSession() {
     g_sentThisSession = false; g_pendingSend.clear(); g_sendOffset = 0;
-    g_stash.clear(); g_recvBuf.clear(); g_respawn.clear(); g_applied.clear(); g_condition.clear();
+    g_stash.clear(); g_stashOwner.clear(); g_recvBuf.clear(); g_respawn.clear(); g_applied.clear(); g_condition.clear();
 }
-// The two "done for this pawn" latches compare raw pointers. After a map change the allocator can hand
+// The "done for this pawn" latches compare raw pointers. After a map change the allocator can hand
 // the new pawn the old address, and the HUD (which lives under the GameInstance and survives the
-// travel) would then never be rebound, nor the weapons rebuilt.
+// travel) would then never be rebound, nor the weapons rebuilt -- and the speed guard would treat the
+// new ship as the old one and write the old ship's speeds into it.
 void OnWorldChanged() {
     g_builtFor = nullptr;
     g_lastHudPawn = nullptr;
     g_reticleNext = 0;
+    g_speedPawn = nullptr;
+    g_filledPawns.clear();
 }
 }

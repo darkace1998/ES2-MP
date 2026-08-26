@@ -240,6 +240,61 @@ bool SetActorTransform(AActor* a, const FTransform& t, bool sweep, int teleport)
 void SetReplicates(AActor* a, bool b) { Rva<std::remove_pointer_t<Fn_SetReplicates>>(es2rva::AActor_SetReplicates)(a, b); }
 void SetReplicateMovement(AActor* a, bool b) { Rva<std::remove_pointer_t<Fn_SetReplicates>>(es2rva::AActor_SetReplicateMovement)(a, b); }
 
+// ---------------------------------------------------------------- net guids
+// FNetworkGUID is 8 bytes but NOT trivially copyable, so it is returned through a hidden pointer:
+// member function => (this=RCX, sret=RDX, args...). Getting this wrong put the UObject* into the sret
+// slot, which faulted inside FNetGUIDCache::SupportsObject.
+using Fn_GetNetGUID = void (*)(void* guidCache, uint64_t* sretGuid, const UObject* obj);
+using Fn_GetObjectFromNetGUID = UObject* (*)(void* guidCache, const uint64_t* guid, bool ignoreDeleted);
+
+void* LocalGuidCache() {
+    UNetDriver* nd = GetNetDriver(GetWorld());
+    return nd ? UE_FIELD(void*, nd, es2off::UNetDriver::GuidCache) : nullptr;   // TSharedPtr: object first
+}
+uint64_t NetGuidOf(const UObject* actor) {
+    void* cache = LocalGuidCache();
+    if (!cache || !actor) return 0;
+    uint64_t guid = 0;
+    Rva<std::remove_pointer_t<Fn_GetNetGUID>>(es2rva::FNetGUIDCache_GetNetGUID)(cache, &guid, actor);
+    return guid;
+}
+static uint64_t g_guidScans = 0;
+static std::unordered_map<uint64_t, uint64_t> g_guidMiss;   // guid -> frame of the last failed scan
+static constexpr uint64_t kGuidMissFrames = 30;             // ~0.5 s at 60 fps before a guid is scanned for again
+AActor* ActorFromNetGuid(uint64_t guid) {
+    if (!guid) return nullptr;
+    void* cache = LocalGuidCache();
+    if (!cache) return nullptr;
+    uint64_t g = guid;
+    UObject* o = Rva<std::remove_pointer_t<Fn_GetObjectFromNetGUID>>(es2rva::FNetGUIDCache_GetObjectFromNetGUID)(cache, &g, false);
+    if (o && IsValidObject(o) && !(GetObjectFlags(o) & 0x10 /*RF_ClassDefaultObject*/)) {
+        uint64_t back = 0;
+        Rva<std::remove_pointer_t<Fn_GetNetGUID>>(es2rva::FNetGUIDCache_GetNetGUID)(cache, &back, o);
+        if (back == guid) return (AActor*)o;
+    }
+    const uint64_t frame = *Rva<uint64_t>(es2rva::GFrameCounter);
+    auto miss = g_guidMiss.find(guid);
+    if (miss != g_guidMiss.end() && frame - miss->second < kGuidMissFrames) return nullptr;
+    ++g_guidScans;
+    AActor* found = nullptr;
+    UClass* actorClass = FindClass("Actor");
+    ForEachObject([&](UObject* obj) {
+        if (!actorClass || !IsA(obj, actorClass)) return true;
+        if (GetObjectFlags(obj) & 0x10) return true;                 // never a class default object
+        uint64_t back = 0;
+        Rva<std::remove_pointer_t<Fn_GetNetGUID>>(es2rva::FNetGUIDCache_GetNetGUID)(cache, &back, obj);
+        if (back == guid) { found = (AActor*)obj; return false; }
+        return true;
+    });
+    if (!found) {
+        if (g_guidMiss.size() > 4096) g_guidMiss.clear();
+        g_guidMiss[guid] = frame;
+    } else g_guidMiss.erase(guid);
+    return found;
+}
+uint64_t GuidScans() { return g_guidScans; }
+void ResetGuidLookup() { g_guidMiss.clear(); }
+
 // ---------------------------------------------------------------- reflection
 std::string FieldClassName(const FField* f) {
     if (!f) return "null";

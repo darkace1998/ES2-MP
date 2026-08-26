@@ -44,6 +44,13 @@ static uint64_t g_respawns = 0;
 
 struct DeathState { double deadSince = 0; bool pending = false; };
 static std::map<int, DeathState> g_state;
+// Per pawn CLASS: the offset of the property holding its HealthComponent (-1 = none). IsFlying runs for
+// every player every frame, and walking the whole reflection chain (two engine FName::ToString per
+// property across five classes) each time was several hundred allocations per player per frame.
+static std::map<UClass*, int32_t> g_healthPropOffset;
+
+void OnPlayerLeft(int id) { g_state.erase(id); }
+void Reset() { g_state.clear(); g_healthPropOffset.clear(); }
 
 // ES2 hands the controller a BP_Pawn_GameOver_C when the run ends. That — not "anything that is not a
 // ship" — is what death looks like.
@@ -65,15 +72,22 @@ static bool IsFlying(AActor* pawn) {
     if (!esPawn || !IsA((UObject*)pawn, esPawn)) return true;       // docked / cinematic: not our business
     // hull ratio, if the pawn has a health component
     UClass* hc = FindClass("HealthComponent");
-    if (hc) {
-        for (auto& p : GetProperties((UStruct*)GetClass((UObject*)pawn), true)) {
+    if (!hc) return true;
+    UClass* cls = GetClass((UObject*)pawn);
+    auto it = g_healthPropOffset.find(cls);
+    if (it == g_healthPropOffset.end() || !IsValidObject((UObject*)cls)) {
+        int32_t off = -1;
+        for (auto& p : GetProperties((UStruct*)cls, true)) {
             if (p.TypeName != "ObjectProperty") continue;
             UObject* v = UE_FIELD(UObject*, pawn, p.Offset);
-            if (v && IsValidObject(v) && IsA(v, hc))
-                return UE_FIELD(float, v, es2off::UHealthComponent::HitpointRatio) > 0.f;
+            if (v && IsValidObject(v) && IsA(v, hc)) { off = p.Offset; break; }
         }
+        it = g_healthPropOffset.emplace(cls, off).first;
     }
-    return true;
+    if (it->second < 0) return true;
+    UObject* v = UE_FIELD(UObject*, pawn, it->second);
+    if (!v || !IsValidObject(v) || !IsA(v, hc)) { g_healthPropOffset.erase(it); return true; }   // layout changed: relearn next time
+    return UE_FIELD(float, v, es2off::UHealthComponent::HitpointRatio) > 0.f;
 }
 
 // Hard veto: never let a co-op player's controller be put into the GAME-OVER pawn, which is what starts
@@ -97,21 +111,26 @@ static void H_Possess(void* controller, AActor* pawn) {
     o_Possess(controller, pawn);
 }
 
-// While a co-op session is live these two end it for everyone.
+// While a co-op session is live, the HOST leaving ends it for everyone -- so the host's exits are
+// blocked. A client returning to the menu only drops that client, which is its call to make (and the
+// only way it has to leave at all; solo docking already client-travels out of the session the same way).
 static void H_ReturnToMainMenu(void* pc) {
-    if (g_blockSessionExits && coop::CurrentRole() != coop::Role::None) {
+    if (g_blockSessionExits && coop::CurrentRole() == coop::Role::Host) {
         ++g_blockedExits;
-        LOGF("[respawn] blocked ReturnToMainMenu during a co-op session");
+        LOGF("[respawn] blocked ReturnToMainMenu during a co-op session (host)");
         return;
     }
     o_ReturnToMainMenu(pc);
 }
+// LoadGame stays blocked on both sides: on a client it would swap the UPlayerData the replicated pawn
+// and every mirrored record are built from, mid-session.
 static void H_LoadGame(const UObject* wco, const void* saveName, int userIndex) {
     if (g_blockSessionExits && coop::CurrentRole() != coop::Role::None) {
         ++g_blockedExits;
         LOGF("[respawn] blocked LoadGame during a co-op session (it would end it for everyone)");
         return;
     }
+    coop::OnSaveLoad();      // a different save: per-save caches (mission snapshot) must not carry over
     o_LoadGame(wco, saveName, userIndex);
 }
 

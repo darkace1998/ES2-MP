@@ -67,10 +67,20 @@ static bool g_syncRewards = true;
 static bool g_logItems = false;      // observability only: who grants items, and on which machine
 static uint64_t g_rewardSent = 0, g_rewardApplied = 0;
 static bool g_applying = false;          // re-entrancy guard for our own writes
-static uint64_t g_taskSent = 0, g_taskApplied = 0, g_dlgSent = 0, g_dlgApplied = 0, g_xpSent = 0;
+static uint64_t g_taskSent = 0, g_taskApplied = 0, g_dlgSent = 0, g_dlgApplied = 0;
 static float g_xpApplied = 0;
 static bool g_indicatorsDirty = false;
 static double g_refreshAccum = 0;
+// Join snapshots, paced: every entry is one reliable ClientMessage bunch on the joiner's controller
+// channel, and UE drops a connection whose channel has more than 256 reliable bunches in flight. A long
+// host session can hold more cached tasks than that, and the join already puts WELCOME/ROSTER/SD on
+// the same channel in the same frames -- so the snapshot goes out a few per tick, like loadout's chunks.
+struct JoinSnapshot { APlayerController* pc; std::vector<std::string> msgs; size_t next = 0; };
+static std::vector<JoinSnapshot> g_joinQueue;
+static constexpr size_t kSnapshotPerTick = 8;
+static uint64_t g_snapshotSent = 0;
+
+void ResetSession() { g_taskCache.clear(); g_joinQueue.clear(); g_indicatorsDirty = false; }
 
 // ---------------------------------------------------------------- mission mirroring
 static void BroadcastTask(void* task) {
@@ -226,6 +236,7 @@ static bool ApplyDialog(const std::string& body) {
 // redirects UGameplayLib::AddXP to that player. All that remains here is applying an incoming award.
 
 static bool ApplyXP(const std::string& body) {
+    if (!g_syncXP) return true;                 // `world xp 0` -- was set but never consulted
     float xp = (float)atof(body.c_str());
     if (xp <= 0.f) return true;
     Rva<std::remove_pointer_t<Fn_AddXP>>(es2rva::UGameplayLib_AddXP)(xp, false, false, 0.f);
@@ -254,7 +265,12 @@ static bool ApplyXP(const std::string& body) {
 // primitives rather than AddNonItemRewards itself, so it never depends on having the mission's task
 // record (the real function looks one up for its decal unlocks).
 static void H_AddNonItemRewards(const void* rewards, const void* missionType, const void* factionGroup, const void* name) {
+    // The host's own payout. If a client's killing blow completed the task, this runs INSIDE that
+    // player's kill scope, where attribution redirects every AddXP to the killer -- who is about to get
+    // the same XP again from the MR broadcast below, while the host got none. Mark it as ours.
+    coop::PushLocalAward();
     o_AddNonItemRewards(rewards, missionType, factionGroup, name);
+    coop::PopLocalAward();
     if (!g_syncRewards || g_applying || !rewards) return;
     if (coop::CurrentRole() != coop::Role::Host) return;
     const uint8_t* r = (const uint8_t*)rewards;
@@ -302,13 +318,25 @@ static bool ApplyRewards(const std::string& body) {
 void OnPlayerJoined(APlayerController* pc) {
     if (!g_syncMissions || coop::CurrentRole() != coop::Role::Host || !pc) return;
     // Re-send every task we know about so a joiner is consistent, not just up to date from now on.
-    int n = 0;
-    for (auto& [key, s] : g_taskCache) {
-        coop::SendToClient(pc, Format("MT|%s|%d|%d|%d|%s|%s", s.id.c_str(), s.state, s.stage, s.progress,
-                                      s.locStr.c_str(), s.stationStr.c_str()));
-        ++n;
+    for (auto& q : g_joinQueue) if (q.pc == pc) return;    // already queued for this controller
+    JoinSnapshot snap; snap.pc = pc;
+    for (auto& [key, s] : g_taskCache)
+        snap.msgs.push_back(Format("MT|%s|%d|%d|%d|%s|%s", s.id.c_str(), s.state, s.stage, s.progress,
+                                   s.locStr.c_str(), s.stationStr.c_str()));
+    LOGF("[world] queued %d cached mission task(s) for joiner %s", (int)snap.msgs.size(), GetName((UObject*)pc).c_str());
+    if (!snap.msgs.empty()) g_joinQueue.push_back(std::move(snap));
+}
+
+static void DrainJoinQueue() {
+    if (g_joinQueue.empty()) return;
+    JoinSnapshot& q = g_joinQueue.front();
+    // The joiner may be gone again before its snapshot is through (docking rejoins are quick).
+    if (!IsValidObject((UObject*)q.pc) || !players::ByController(q.pc)) { g_joinQueue.erase(g_joinQueue.begin()); return; }
+    for (size_t n = 0; n < kSnapshotPerTick && q.next < q.msgs.size(); ++n, ++q.next) { coop::SendToClient(q.pc, q.msgs[q.next]); ++g_snapshotSent; }
+    if (q.next >= q.msgs.size()) {
+        LOGF("[world] snapshot of %d task(s) sent to %s", (int)q.msgs.size(), GetName((UObject*)q.pc).c_str());
+        g_joinQueue.erase(g_joinQueue.begin());
     }
-    LOGF("[world] sent %d cached mission task(s) to joiner %s", n, GetName((UObject*)pc).c_str());
 }
 
 // ---------------------------------------------------------------- dispatch
@@ -325,7 +353,8 @@ bool OnClientOp(const std::string& op, const std::string& body) {
 }
 
 void Tick(float dt, bool isHost) {
-    if (isHost || !g_indicatorsDirty) return;
+    if (isHost) { DrainJoinQueue(); return; }
+    if (!g_indicatorsDirty) return;
     // Refreshing walks every registered marker and does path-finding, so coalesce it.
     g_refreshAccum += dt;
     if (g_refreshAccum < 1.0) return;
@@ -357,9 +386,10 @@ static void CmdWorld(const console::Args& a, std::string& out) {
         out += "granted\n";
     }
     if (a.size() > 1 && a[1] == "refresh")  { Rva<std::remove_pointer_t<Fn_RefreshIndicators>>(es2rva::UMapLib_RefreshMissionAndWaypointIndicators)(); out += "indicators refreshed\n"; }
-    out += Format("missions=%d dialog=%d xp=%d | sent: tasks=%llu dialog=%llu xp=%llu | applied: tasks=%llu dialog=%llu xp=%.1f\n",
+    // (XP is SENT by attribution.cpp -- see `attribution` for that counter; only the apply side is here.)
+    out += Format("missions=%d dialog=%d xp=%d | sent: tasks=%llu dialog=%llu snapshot=%llu | applied: tasks=%llu dialog=%llu xp=%.1f\n",
                   (int)g_syncMissions, (int)g_syncDialog, (int)g_syncXP,
-                  (unsigned long long)g_taskSent, (unsigned long long)g_dlgSent, (unsigned long long)g_xpSent,
+                  (unsigned long long)g_taskSent, (unsigned long long)g_dlgSent, (unsigned long long)g_snapshotSent,
                   (unsigned long long)g_taskApplied, (unsigned long long)g_dlgApplied, g_xpApplied);
     out += Format("rewards=%d logItems=%d | sent=%llu applied=%llu\n", (int)g_syncRewards, (int)g_logItems,
                   (unsigned long long)g_rewardSent, (unsigned long long)g_rewardApplied);
