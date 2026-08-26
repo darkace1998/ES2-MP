@@ -7,6 +7,73 @@ Every release is pinned to one game build: the mod compares the game exe's PE ti
 baked into its SDK headers and disables itself if they differ, so after a game patch it stays inert until
 it is regenerated and rebuilt.
 
+## [0.2.3] - 2026-08-26
+
+An audit release. A full read-through of `mod/src`, `scripts/` and `tools/` turned up 46 defects, fixed
+in one pass; none came from a player report, and most sit where two players never go — a slot being
+reused, a third player, a session that ends and another that starts. It builds clean, but the live
+two-instance harness has **not** been run on it yet: treat it as a candidate until `verify.py` is green.
+Everyone in a session must run the same version — the `PT` and `HP` payloads and the ghost-query answer
+changed shape.
+
+### Fixed
+- **Three or more players: a client's ship was frozen for every other client.** A client's registry only
+  ever held itself, so the host's position relay for a third player was parsed and dropped — and the host
+  switches movement replication off for client-driven ships, so nothing else moved them either. The relay
+  now names the pawn by NetGUID and clients track the other players' ships from it.
+- **The ghost reconcile could be cancelled before it ran.** The per-destroy report and the answer to the
+  client's query shared an op; any placed actor the host destroyed in the seconds before the first query
+  latched "answered", and every ghost from the save state stayed on the client for the whole map.
+- **Blueprint ran inside the net receive path** — retiring ghosts through `K2_DestroyActor` and spawning
+  mirrored pickups, the exact pattern that crashed the client before. Both are queued to the tick now.
+- **A dead NPC's aim and lock haunted whatever reused its weapon component's address**, and a recycled NPC
+  inherited a previous occupant's "death announced" flag, so it exploded for nobody. Component and actor
+  keys are dropped when the pawn is destroyed, and a hull back above zero resets the latch.
+- **A target dying triggered whole-object-array scans per weapon component per frame** until the next aim
+  update; failed lookups are now remembered for a few frames.
+- **The loadout respawn had no failure path.** A `RestartPlayer` that produced no pawn left the
+  controller pawn-less (the state the HUD tick faults on) and marked the player applied; a scheduled
+  respawn that could not run was silently dropped; a failed import still counted as applied. It now
+  re-possesses the placeholder, retries, and only marks applied when the spawner actually took the ship.
+- **A newcomer landing in a freed slot spawned in the previous occupant's ship.** The stash is keyed on
+  who is on the connection, not on the slot.
+- **Menu transport and presence.** MULTIPLAYER OFF never went back to `netdriver ip`, so after one Steam
+  session every later LAN host silently came up on SteamNetDriver; the Steam connect presence was only
+  ever cleared by that OFF click (friends kept seeing "Join Game" after the session ended, and even when
+  `listen` had failed); the plain LAN toggle advertised a `steam.<id>` address an IP server cannot honour.
+- **World-origin shifting stayed off for single-player** for the rest of the process after any session.
+- **Stale roster names blocked lobby slots**: a player who left kept "occupying" their slot on clients.
+- **The mission snapshot to a joiner was one reliable bunch per cached task, all in one frame** (UE drops
+  the connection past 256), and the cache survived loading a different save. It is paced now and reset
+  with the save.
+- **Per-player state survived a slot being reused**: death timers (an immediate respawn during the
+  loadout swap), aim/lock/auto-aim, queued damage numbers.
+- **Mission XP completed by a client's kill was paid twice to the killer and not at all to the host.**
+- **A client could not leave a session** — ReturnToMainMenu was blocked for clients too.
+- Stack sizes of mirrored drops were never applied; `guard on` blocked every mirrored pickup; `world xp 0`
+  did nothing; `IsFlying` walked the whole reflection chain per player per frame; the host-speed guard
+  and the injected menu widgets kept raw pointers across map changes; the reticle setter wrote parms
+  without the `CPF_Parm` filter; loadout chunks could be cut inside a UTF-8 sequence or advanced past a
+  drop; the reconnect path could `open` a host from the main menu (the ES2 crash the docking path already
+  avoids); partner hull/shield was never shown on a client; NPC HP mirroring restarted from the head every
+  tick and starved mines and props; an NPC that opened fire before it was replicated stayed "already
+  firing" forever.
+
+### Changed
+- `god [0|1] [playerId]` — on the host, a player id protects that player's server-side ship.
+- NetGUID helpers (`NetGuidOf`, `ActorFromNetGuid`) live in `ue.h`; `combat` and `coop` share them.
+- Steam offsets and the three `UShipMovementComponent` speed offsets come from the generator again
+  (they had been lost to a duplicate key); `gen_sdk.py` now fails on duplicate keys and missing members.
+
+### Tooling
+- `verify.py` could pass green with the mission check silently missing from the tally, matched
+  `progress=3` inside `progress=30`, capped actor lists below where the player pawns sit, and crashed
+  instead of failing on an unreadable `world`; `combat-test.py` never actually made anyone invulnerable
+  (now gods the host, the client's server-side ship and the client); `loadout-test.py` lost players with
+  spaces in their names; `coop-session.sh` timeouts are wall-clock (a "240 s" wait could run 44 minutes);
+  `crash.sh` mis-symbolised offsets below the first symbol; `kill.sh` no longer kills tooling that merely
+  names the exe.
+
 ## [0.2.2] - 2026-08-25
 
 Mining, and a ship-speed bug that has been there since multiplayer first worked — it only became visible
